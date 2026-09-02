@@ -51,6 +51,11 @@ func executar(log *slog.Logger) error {
 			return err
 		}
 	}
+	if app.WorkerCarteira != nil {
+		if err := app.WorkerCarteira.Iniciar(); err != nil {
+			return err
+		}
+	}
 
 	srv := &http.Server{
 		Addr:    "0.0.0.0:" + cfg.Port,
@@ -92,6 +97,9 @@ func executar(log *slog.Logger) error {
 	// banco não sabe.
 	if app.Worker != nil {
 		app.Worker.Parar(desligarCtx)
+	}
+	if app.WorkerCarteira != nil {
+		app.WorkerCarteira.Parar(desligarCtx)
 	}
 
 	if err := srv.Shutdown(desligarCtx); err != nil {

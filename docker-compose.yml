@@ -81,6 +81,19 @@ services:
       # chave só existe em produção, provisionada pelo time de TI
       # (system-design/padroes/12-gateway-arcom.md).
       GATEWAY_ARCOM_API_KEY: "${GATEWAY_ARCOM_API_KEY:-}"
+      # Campos do dataset `debitos` pendentes de confirmação com a TI; em
+      # branco usa o padrão do código.
+      GATEWAY_CAMPO_VENCIMENTO: "${GATEWAY_CAMPO_VENCIMENTO:-}"
+      GATEWAY_CAMPO_VALOR: "${GATEWAY_CAMPO_VALOR:-}"
+      SINCRONIZACAO_HORARIO: "${SINCRONIZACAO_HORARIO:-}"
+      # Credenciais da Cloud API da Meta. Sem elas a fila enche e nada sai —
+      # e nada é marcado como enviado.
+      WHATSAPP_PHONE_NUMBER_ID: "${WHATSAPP_PHONE_NUMBER_ID:-}"
+      WHATSAPP_ACCESS_TOKEN: "${WHATSAPP_ACCESS_TOKEN:-}"
+      WHATSAPP_API_VERSION: "${WHATSAPP_API_VERSION:-}"
+      # Sem estes dois a rota de webhook não é montada.
+      WHATSAPP_APP_SECRET: "${WHATSAPP_APP_SECRET:-}"
+      WHATSAPP_VERIFY_TOKEN: "${WHATSAPP_VERIFY_TOKEN:-}"
     expose: ["3000"]
     depends_on:
       postgres: { condition: service_healthy }

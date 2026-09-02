@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/httprate"
 
 	"facilitaarcom/internal/acesso"
+	"facilitaarcom/internal/carteira"
 	"facilitaarcom/internal/cobranca"
 	"facilitaarcom/internal/conversa"
 	"facilitaarcom/internal/disparo"
@@ -50,6 +51,7 @@ func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 	hNegociacao := negociacao.NovoHandler(s.negociacao, s.H)
 	hDisparo := disparo.NovoHandler(s.disparo, s.H)
 	hConversa := conversa.NovoHandler(s.conversa, s.H)
+	hCarteira := carteira.NovoHandler(s.carteira, s.H)
 
 	// Público. /sessao é login/logout/quem-sou-eu; /negociar é a tela que o
 	// cliente devedor abre pelo link do WhatsApp, sem conta — quem autoriza
@@ -78,5 +80,6 @@ func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 		g.Route("/acordos", hCobranca.RotasAcordos)
 		g.Route("/disparos", hDisparo.Rotas)
 		g.Route("/conversas", hConversa.Rotas)
+		g.Route("/sincronizacao", hCarteira.Rotas)
 	})
 }

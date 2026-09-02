@@ -115,28 +115,86 @@ func decodificarLista(corpo []byte, destino any) error {
 	return nil
 }
 
-// Mapear traduz um débito do Gateway para a linha de carteira.
+// CampoVencimento e CampoValor são as duas escolhas que a documentação do
+// Gateway ainda não responde (ver o bloco no topo deste arquivo). Ficam
+// configuráveis para que a resposta do time de TI vire troca de variável de
+// ambiente, e não alteração de código com novo deploy.
+type CampoVencimento string
+type CampoValor string
+
+const (
+	// VencimentoPadrao é data_vencto — o nome mais direto para "data de
+	// vencimento". data_vct fica como alternativa por parecer a mesma coisa
+	// abreviada.
+	VencimentoPadrao      CampoVencimento = "data_vencto"
+	VencimentoAlternativo CampoVencimento = "data_vct"
+
+	// ValorPadrao é vlr_liquido_deb ("valor líquido do débito"), o que mais se
+	// parece com saldo devedor. deb_vlr_docto seria o valor de face do
+	// documento.
+	ValorPadrao    CampoValor = "vlr_liquido_deb"
+	ValorDocumento CampoValor = "deb_vlr_docto"
+)
+
+// Mapeamento diz de quais campos do Gateway sair o vencimento e o valor.
+type Mapeamento struct {
+	Vencimento CampoVencimento
+	Valor      CampoValor
+}
+
+// MapeamentoPadrao é o palpite mais defensável enquanto a semântica não é
+// confirmada — e está isolado aqui para ser trocado numa linha.
+func MapeamentoPadrao() Mapeamento {
+	return Mapeamento{Vencimento: VencimentoPadrao, Valor: ValorPadrao}
+}
+
+// Valido recusa campo fora dos documentados, para uma variável de ambiente
+// com erro de digitação não virar carteira vazia em silêncio.
+func (m Mapeamento) Valido() error {
+	switch m.Vencimento {
+	case VencimentoPadrao, VencimentoAlternativo:
+	default:
+		return fmt.Errorf("campo de vencimento %q não existe no dataset debitos", m.Vencimento)
+	}
+	switch m.Valor {
+	case ValorPadrao, ValorDocumento:
+	default:
+		return fmt.Errorf("campo de valor %q não existe no dataset debitos", m.Valor)
+	}
+	return nil
+}
+
+// Mapear traduz um débito do Gateway para a linha de carteira, usando o
+// mapeamento configurado.
 //
 // É AQUI que moram as duas escolhas pendentes de confirmação (ver o bloco no
 // topo do arquivo). Estão concentradas neste ponto justamente para que a
-// resposta do time de TI vire uma troca de uma linha, e não uma caçada pelo
-// código.
-func Mapear(d Debito) (LinhaCarteira, error) {
-	// ESCOLHA PENDENTE 1 — vencimento. data_vencto é o nome mais direto para
-	// "data de vencimento"; data_vct fica como reserva por parecer a mesma
-	// coisa abreviada. Confirmar qual é a data de vencimento do título.
+// resposta do time de TI seja uma troca de configuração.
+func Mapear(d Debito, m Mapeamento) (LinhaCarteira, error) {
 	vencimento := d.DataVencto
-	if vencimento == "" {
+	if m.Vencimento == VencimentoAlternativo {
 		vencimento = d.DataVct
 	}
+	// Cair para o outro campo quando o escolhido vem vazio é melhor que
+	// descartar a linha — mas só quando o outro tem conteúdo.
+	if vencimento == "" {
+		if m.Vencimento == VencimentoAlternativo {
+			vencimento = d.DataVencto
+		} else {
+			vencimento = d.DataVct
+		}
+	}
 
-	// ESCOLHA PENDENTE 2 — valor. vlr_liquido_deb ("valor líquido do débito")
-	// é o que mais se parece com o saldo devedor; deb_vlr_docto seria o valor
-	// de face do documento. Cobrar o valor errado é erro caro nos dois
-	// sentidos, então isto precisa de confirmação antes de ir a produção.
 	valor := d.ValorLiquido
-	if valor <= 0 {
+	if m.Valor == ValorDocumento {
 		valor = d.DebValorDocumento
+	}
+	if valor <= 0 {
+		if m.Valor == ValorDocumento {
+			valor = d.ValorLiquido
+		} else {
+			valor = d.DebValorDocumento
+		}
 	}
 
 	documento := primeiroNaoVazio(d.CNPJ, d.Documento)
@@ -151,6 +209,8 @@ func Mapear(d Debito) (LinhaCarteira, error) {
 		return LinhaCarteira{}, fmt.Errorf("débito %q sem data de vencimento", d.SeqDebito)
 	case valor <= 0:
 		return LinhaCarteira{}, fmt.Errorf("débito %q sem valor positivo", d.SeqDebito)
+	case d.SeqDebito == "":
+		return LinhaCarteira{}, errors.New("débito sem identificador (seq_debito)")
 	}
 
 	return LinhaCarteira{

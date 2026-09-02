@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"facilitaarcom/internal/acesso"
+	"facilitaarcom/internal/carteira"
 	"facilitaarcom/internal/cobranca"
 	"facilitaarcom/internal/config"
 	"facilitaarcom/internal/conversa"
@@ -45,9 +46,12 @@ type Servidor struct {
 	webhook    *conversa.Webhook
 	gateway    *gatewayarcom.Cliente
 
-	// worker fica exposto para cmd/server iniciar e parar junto com o
+	carteira *carteira.Service
+
+	// Os workers ficam expostos para cmd/server iniciar e parar junto com o
 	// http.Server — o servidor monta, quem controla o ciclo de vida é o main.
-	Worker *disparo.Worker
+	Worker         *disparo.Worker
+	WorkerCarteira *carteira.Worker
 }
 
 // Novo monta o router e devolve http.Handler — é o que os testes usam quando
@@ -74,6 +78,23 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 		// O Gateway é opcional: sem GATEWAY_ARCOM_API_KEY o client existe e
 		// cada chamada devolve ErrSemCredencial, que é o esperado em dev.
 		s.gateway = gatewayarcom.NovoCliente(cfg.GatewayArcomAPIKey)
+
+		mapeamento := gatewayarcom.MapeamentoPadrao()
+		if cfg.GatewayCampoVencimento != "" {
+			mapeamento.Vencimento = gatewayarcom.CampoVencimento(cfg.GatewayCampoVencimento)
+		}
+		if cfg.GatewayCampoValor != "" {
+			mapeamento.Valor = gatewayarcom.CampoValor(cfg.GatewayCampoValor)
+		}
+		if err := mapeamento.Valido(); err != nil {
+			// Campo com erro de digitação traria carteira vazia em silêncio;
+			// melhor voltar ao padrão e avisar alto.
+			log.Error("mapeamento do Gateway inválido — usando o padrão", "erro", err)
+			mapeamento = gatewayarcom.MapeamentoPadrao()
+		}
+
+		s.carteira = carteira.NovoService(gdb, s.gateway, mapeamento, log)
+		s.WorkerCarteira = carteira.NovoWorker(s.carteira, cfg.SincronizacaoHorario, log)
 
 		// O canal só existe quando as credenciais da Meta estão configuradas.
 		// Sem elas o serviço roda com canal nulo: a fila funciona, nada é

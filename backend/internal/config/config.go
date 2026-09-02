@@ -58,6 +58,16 @@ type Config struct {
 	// handshake de verificação.
 	WhatsAppVerifyToken string
 
+	// Os dois campos do dataset `debitos` cuja semântica a documentação do
+	// Gateway ainda marca como "a revisar". Configuráveis para que a resposta
+	// do time de TI seja troca de variável de ambiente, e não novo deploy de
+	// código (ver internal/gatewayarcom/debitos.go).
+	GatewayCampoVencimento string
+	GatewayCampoValor      string
+
+	// Horário (cron, em UTC) da sincronização diária da carteira.
+	SincronizacaoHorario string
+
 	// AppURL é o endereço público da aplicação, usado para montar o link de
 	// negociação que vai na mensagem ao cliente. Precisa ser absoluto: o link
 	// é aberto do WhatsApp, fora do contexto do site.
@@ -76,7 +86,10 @@ func Load() (*Config, error) {
 		JWTSecret:   os.Getenv("JWT_SECRET"),
 		AppURL:      env("APP_URL", "http://localhost:8080"),
 
-		GatewayArcomAPIKey: os.Getenv("GATEWAY_ARCOM_API_KEY"),
+		GatewayArcomAPIKey:     os.Getenv("GATEWAY_ARCOM_API_KEY"),
+		GatewayCampoVencimento: os.Getenv("GATEWAY_CAMPO_VENCIMENTO"),
+		GatewayCampoValor:      os.Getenv("GATEWAY_CAMPO_VALOR"),
+		SincronizacaoHorario:   os.Getenv("SINCRONIZACAO_HORARIO"),
 
 		WhatsAppIDNumero:    os.Getenv("WHATSAPP_PHONE_NUMBER_ID"),
 		WhatsAppToken:       os.Getenv("WHATSAPP_ACCESS_TOKEN"),

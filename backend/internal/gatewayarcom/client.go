@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -74,6 +75,7 @@ func (e *ErroResposta) Error() string {
 
 type Cliente struct {
 	apiKey string
+	base   string
 	http   *http.Client
 }
 
@@ -85,6 +87,7 @@ type Cliente struct {
 func NovoCliente(apiKey string) *Cliente {
 	return &Cliente{
 		apiKey: apiKey,
+		base:   BaseURL,
 		// Timeout sempre presente: sem ele uma chamada pendurada segura um
 		// worker do backend indefinidamente.
 		http: &http.Client{Timeout: 15 * time.Second},
@@ -92,6 +95,18 @@ func NovoCliente(apiKey string) *Cliente {
 }
 
 func (c *Cliente) TemCredencial() bool { return c.apiKey != "" }
+
+// ComBaseURL devolve uma cópia do client apontando para outro endereço.
+//
+// Existe para teste: em produção a base é sempre BaseURL, e é justamente por
+// ela ser constante que esta superfície não tem SSRF. Um teste que aponta
+// para httptest não muda essa garantia, porque o endereço nunca vem de input
+// de cliente.
+func (c *Cliente) ComBaseURL(base string) *Cliente {
+	copia := *c
+	copia.base = strings.TrimRight(base, "/")
+	return &copia
+}
 
 // Consultar faz GET /v1/{dataset} com os filtros dados e devolve o JSON crú.
 // Quem decide dataset, campos e filtros é o service do recurso.
@@ -115,7 +130,7 @@ func (c *Cliente) get(ctx context.Context, dataset Dataset, sufixo string, filtr
 
 	// url.JoinPath escapa o segmento; junto com o conjunto fechado de
 	// Dataset, o caminho não tem como sair de /v1.
-	alvo, err := url.JoinPath(BaseURL, "v1", string(dataset)+sufixo)
+	alvo, err := url.JoinPath(c.base, "v1", string(dataset)+sufixo)
 	if err != nil {
 		return nil, fmt.Errorf("montar url do gateway: %w", err)
 	}

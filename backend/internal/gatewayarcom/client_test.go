@@ -15,29 +15,7 @@ import (
 // a chave só existe lá.
 func clienteApontandoPara(t *testing.T, srv *httptest.Server, chave string) *Cliente {
 	t.Helper()
-	c := NovoCliente(chave)
-	// Redireciona o host mantendo o resto do caminho — é o mesmo efeito de
-	// trocar a BaseURL, sem abrir a constante para configuração.
-	c.http = srv.Client()
-	c.http.Transport = redirecionar{base: srv.URL, seguinte: srv.Client().Transport}
-	return c
-}
-
-type redirecionar struct {
-	base     string
-	seguinte http.RoundTripper
-}
-
-func (r redirecionar) RoundTrip(req *http.Request) (*http.Response, error) {
-	alvo, err := url.Parse(r.base)
-	if err != nil {
-		return nil, err
-	}
-	req.URL.Scheme, req.URL.Host = alvo.Scheme, alvo.Host
-	if r.seguinte == nil {
-		return http.DefaultTransport.RoundTrip(req)
-	}
-	return r.seguinte.RoundTrip(req)
+	return NovoCliente(chave).ComBaseURL(srv.URL)
 }
 
 func TestConsultarMandaAChaveEMontaOCaminho(t *testing.T) {
@@ -210,7 +188,7 @@ func TestMapearRecusaLinhaIncompleta(t *testing.T) {
 
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
-			if _, err := Mapear(c.debito); err == nil {
+			if _, err := Mapear(c.debito, MapeamentoPadrao()); err == nil {
 				t.Error("aceitou linha que não dá pra cobrar")
 			}
 		})
@@ -228,7 +206,7 @@ func TestMapearNormalizaOQueEntra(t *testing.T) {
 		DebValorDocumento:   1400,
 		Filial:              "BH",
 		ResponsavelCobranca: "ANA",
-	})
+	}, MapeamentoPadrao())
 	if err != nil {
 		t.Fatalf("Mapear: %v", err)
 	}
