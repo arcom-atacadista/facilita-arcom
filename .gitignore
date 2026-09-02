@@ -1,0 +1,23 @@
+# sistema
+.DS_Store
+Thumbs.db
+
+# editores
+.vscode/
+.idea/
+
+# node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# go / backend
+*.exe
+
+# ambiente
+.env
+.env.prod
+.env.local
+
+# Claude Code (config local por máquina/usuário)
+.claude/settings.local.json

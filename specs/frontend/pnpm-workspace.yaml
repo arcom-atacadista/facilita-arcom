@@ -1,0 +1,6 @@
+# Nenhuma dependência roda script de instalação — o .npmrc já garante isso
+# (ignore-scripts=true). O esbuild baixa o binário certo da plataforma via
+# optionalDependencies (sem precisar de script); listado aqui só pra
+# confirmar a decisão em vez de deixar pendente a cada instalação.
+allowBuilds:
+  esbuild: false

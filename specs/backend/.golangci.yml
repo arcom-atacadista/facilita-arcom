@@ -1,0 +1,53 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose # response body não fechado (leak de conexão)
+    - contextcheck # context não propagado até o driver
+    - copyloopvar
+    - errorlint # exige %w / errors.Is em vez de comparar erro direto
+    - gosec # segurança (injeção, cripto fraca, credencial hardcoded...)
+    - nilerr
+    - noctx # requisição HTTP sem context
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - wastedassign
+  settings:
+    errcheck:
+      check-type-assertions: true
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true # handler HTTP costuma ter (w, r) sem usar os dois
+  exclusions:
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Teste pode ser mais direto: sem checar tudo que um handler real checaria.
+      - path: _test\.go
+        linters: [gosec, errcheck, bodyclose, noctx, funlen]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - meu-projeto
+
+# Linters deixados de fora de propósito: funlen, cyclop, wrapcheck, dupl,
+# gochecknoglobals — em código gerado por IA para um público não-técnico,
+# geram mais briga do que valor. gosec e staticcheck (via "unused"/"standard")
+# já cobrem a maior parte do que essas ferramentas de estilo pegariam.
+#
+# misspell também fica de fora: o dicionário dele é em inglês e o Padrão ARCOM
+# escreve comentário/identificador em português — ia dar falso positivo em
+# quase toda linha ("conversão", "respondendo" etc.).

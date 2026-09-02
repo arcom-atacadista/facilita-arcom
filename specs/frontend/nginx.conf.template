@@ -1,0 +1,56 @@
+# Gerado a partir deste template via envsubst no boot do container (feature
+# nativa da imagem oficial do nginx: qualquer arquivo em
+# /etc/nginx/templates/*.template vira /etc/nginx/conf.d/*.conf, substituindo
+# só as variáveis que existem de verdade no ambiente do container — variáveis
+# do próprio nginx como $host/$remote_addr não são tocadas). API_TARGET vem do
+# docker-compose (ex.: "http://backend:3000").
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml font/woff2;
+
+    # /api -> backend, mesma origem (sem CORS) — ver padroes/00-visao-geral.md.
+    # proxy_pass SEM path no destino: preserva a URI inteira (/api/v1/...),
+    # mesmo comportamento do proxy do Vite (sem pathRewrite). Sem
+    # `include /etc/nginx/headers-seguranca.conf` de propósito: o backend já manda os
+    # dele — ver esse mesmo arquivo pro motivo.
+    location ^~ /api/ {
+        proxy_pass ${API_TARGET};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # X-Forwarded-For: o backend confia nesse header vindo de 1 salto só
+        # (ClientIPFromXFFTrustedProxies(1) em internal/servidor/servidor.go)
+        # porque este proxy é o único caminho possível até ele.
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # HTML nunca cacheado — senão o navegador não descobre o novo hash dos
+    # assets depois de um deploy.
+    location = /index.html {
+        include /etc/nginx/headers-seguranca.conf;
+        add_header Cache-Control "no-cache";
+    }
+
+    # Assets com hash no nome (Vite) podem cachear por muito tempo.
+    location ~* \.(?:js|css|woff2?|ttf|svg|png|jpg|jpeg|gif|ico)$ {
+        include /etc/nginx/headers-seguranca.conf;
+        try_files $uri =404;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # SPA: qualquer rota do react-router que não seja arquivo estático cai no
+    # index.html.
+    location / {
+        include /etc/nginx/headers-seguranca.conf;
+        try_files $uri /index.html;
+    }
+}

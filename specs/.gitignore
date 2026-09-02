@@ -1,0 +1,15 @@
+# node / front
+node_modules/
+dist/
+frontend/vite.config.js
+frontend/vite.config.d.ts
+*.tsbuildinfo
+# go / back
+/backend/server
+/backend/migrate
+*.exe
+# ambiente
+.env
+.env.prod
+# sistema
+.DS_Store

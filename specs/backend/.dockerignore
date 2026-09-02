@@ -1,0 +1,11 @@
+# O build do backend faz `COPY . .` — sem este arquivo, tudo isso iria pra
+# dentro da imagem. Segredo (.env) e binários compilados NUNCA entram.
+.env
+.env.*
+server
+*.exe
+*.rdb
+*.log
+.DS_Store
+Dockerfile
+.dockerignore

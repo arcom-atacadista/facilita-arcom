@@ -1,0 +1,102 @@
+# Sobe o projeto inteiro com:  docker compose up --build
+# Sem Traefik: o próprio nginx (frontend) serve o build e faz proxy de /api
+# pro backend, então tudo funciona numa origem só, sem CORS.
+#
+# Abra no navegador:  http://localhost:8080
+#
+# Se o SEU projeto NÃO usa banco, remova os serviços postgres e migrate
+# (e a variável DATABASE_URL do backend).
+#
+# Este arquivo NÃO vem com Redis por padrão — de propósito. Um serviço a mais
+# rodando sem que ninguém use é memória gasta à toa, e isso soma rápido numa
+# máquina com vários projetos ao mesmo tempo. Só adicione Redis quando
+# aparecer uma necessidade CONCRETA: cache, fila (asynq), rate limit
+# distribuído entre réplicas, sessão compartilhada (ver 01-stack-permitida.md
+# e 07-frontend-primeiro.md). Nesse momento, acrescente:
+#
+#   services:
+#     redis:
+#       image: redis:7-alpine
+#       restart: unless-stopped
+#       # Sem persistência em disco de propósito: cache/rate-limit/lock são
+#       # dados que não precisam sobreviver a um restart — e ligar RDB/AOF
+#       # sem precisar é a causa mais comum de incidente com Redis em
+#       # produção (disco do volume enche, `stop-writes-on-bgsave-error`
+#       # trava TODA escrita, não só a que não coube). --save "" desliga o
+#       # snapshot; --appendonly no desliga o append-only file. Só ligue
+#       # persistência se o caso de uso EXIGIR Redis como armazenamento
+#       # durável (raro — normalmente é o Postgres quem deveria guardar
+#       # isso). Sem persistência, Redis não precisa de volume nem de
+#       # storage em disco (ver scripts/setup-storage-prod.sh).
+#       command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+#       healthcheck:
+#         test: ["CMD", "redis-cli", "ping"]
+#         interval: 5s
+#         timeout: 3s
+#         retries: 10
+#
+# ...e no backend: REDIS_URL: "redis://redis:6379/0" nas environment, mais
+# `redis: { condition: service_healthy }` no depends_on.
+#
+# Só adicione volume nomeado (e a entrada correspondente em `volumes:` lá
+# embaixo) se DE VERDADE precisar ligar persistência — o padrão acima não
+# usa disco nenhum.
+
+name: ${PROJECT_NAME:-meu-projeto}
+
+services:
+  frontend:
+    build: { context: ./frontend }
+    restart: unless-stopped
+    environment:
+      # alvo do proxy /api dentro da rede do compose (nginx.conf.template)
+      API_TARGET: "http://backend:3000"
+    ports:
+      - "8080:8080"        # navegador -> http://localhost:8080
+    depends_on: [backend]
+
+  # Roda as migrations do Postgres e sai (código 0 = sucesso). O backend só
+  # sobe depois que este serviço termina com sucesso — nunca migration
+  # rodando dentro do boot do servidor (evita corrida entre réplicas).
+  migrate:
+    build: { context: ./backend }
+    command: ["./migrate"]
+    restart: "no"
+    environment:
+      DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD:-app}@postgres:5432/app"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  backend:
+    build: { context: ./backend }
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD:-app}@postgres:5432/app"
+      PORT: "3000"
+    expose: ["3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: app
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

@@ -1,0 +1,127 @@
+# Override de PRODUÇÃO — usado JUNTO com o docker-compose.yml base, nunca sozinho:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Pressupõe um reverse proxy / load balancer FORA deste compose cuidando de TLS
+# e do domínio, repassando HTTP pra porta publicada abaixo. Não sobe Caddy/Traefik.
+#
+# Diferenças em relação ao compose de dev:
+#   - Sem fallback pras secrets: se faltar algo no .env.prod, o `up` falha na
+#     hora em vez de subir com valor de desenvolvimento por engano.
+#   - restart: always — volta sozinho depois de reboot do host.
+#   - Porta do frontend publicada só em 127.0.0.1 (proxy no mesmo host) — o
+#     bind vem fixo na linha `ports:` do serviço `frontend`, `PORT_FRONTEND`
+#     define só o número da porta, não pode virar "0.0.0.0:PORT" por engano no
+#     .env.prod. Se o proxy estiver em outra máquina, troque o `127.0.0.1:`
+#     dessa linha pelo IP do proxy — nunca aberta pra internet sem TLS.
+#   - `ports: !override` no `frontend` — SEM essa tag o Compose FUNDE esta
+#     lista com o "8080:8080" (0.0.0.0, todas as interfaces) do
+#     docker-compose.yml base em vez de substituir. O resultado é duas
+#     publicações da porta 8080 pro mesmo container: a primeira (0.0.0.0)
+#     sobe, a segunda (esta, 127.0.0.1) sempre falha com "address already in
+#     use" — porque a primeira já cobre o loopback. Isso faz o frontend NUNCA
+#     subir em produção, de forma 100% determinística, sem nenhum processo
+#     externo ocupando a porta. `!override` (Compose ≥2.24) força a
+#     substituição em vez da fusão.
+#   - Log rotacionado e limites de CPU/memória por serviço.
+#   - Dados do Postgres em bind mount pro array local do host (backup pela infra).
+#
+# ANTES DO PRIMEIRO `up` (uma vez só, no host, como root) — rode o script de
+# storage. Ele cria os diretórios, dá o dono certo (senão o Postgres recusa a
+# inicializar) E impõe o TETO DE DISCO 100% rígido pro Postgres (10G por
+# padrão):
+#
+#   sudo ./scripts/setup-storage-prod.sh          # sem Redis, é só rodar assim (padrão)
+#
+# O Docker NÃO limita tamanho de volume sozinho (deploy.resources só cobre
+# CPU/memória) — por isso o teto vem do filesystem.
+#
+# Este arquivo NÃO tem Redis por padrão — mesma decisão do docker-compose.yml
+# base (ver comentário lá): só adicione se o projeto realmente usa. Ao
+# adicionar o serviço redis no compose base (sem persistência, é o padrão
+# recomendado — ver comentário lá), acrescente aqui também:
+#
+#   services:
+#     redis:
+#       restart: always
+#       logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+#       # ACIMA do --maxmemory do compose base (com folga pro overhead do
+#       # processo) — senão o container é morto por OOM antes do Redis
+#       # conseguir descartar chave sozinho via allkeys-lru.
+#       deploy: { resources: { limits: { cpus: "0.50", memory: 256M } } }
+#
+# ...e REDIS_URL: "redis://redis:6379/0" nas environment do backend abaixo.
+# Nada de volume nem de rodar o script de storage com COM_REDIS=1 pra esse
+# caso comum (sem persistência) — Redis não grava nada em disco, não precisa
+# de teto de disco nenhum.
+#
+# Só se o projeto EXIGIR Redis durável (raro — questione antes, ver
+# `05-regras-para-a-ia.md`): tire o `--save ""`/`--appendonly no` do compose
+# base, acrescente `volumes: [redisdata:/data]` no serviço, declare o volume
+# nomeado aqui (mesmo padrão do `pgdata` acima, apontando pra
+# `${DATA_DIR}/redis`) e rode o script de storage com `COM_REDIS=1`.
+
+services:
+  migrate:
+    environment:
+      DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}@postgres:5432/app"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  frontend:
+    restart: always
+    ports: !override
+      - "127.0.0.1:${PORT_FRONTEND:?defina PORT_FRONTEND no .env}:8080"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+
+  backend:
+    restart: always
+    environment:
+      DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}@postgres:5432/app"
+      PORT: "3000"
+      # REDIS_URL: "redis://redis:6379/0" — só se o projeto tiver o serviço
+      # redis (ver comentário no topo do arquivo).
+      # Adicione aqui, no formato ${VAR:?defina no .env.prod}, cada segredo que o
+      # projeto usa (JWT, chaves de API de terceiros) — sempre sem fallback.
+      #
+      # Exemplo pra projeto que manda e-mail (ver 01-stack-permitida.md) — só
+      # inclua se o projeto realmente usa SMTP, remova senão:
+      # SMTP_HOST: "${SMTP_HOST:?defina SMTP_HOST no .env}"
+      # SMTP_PORTA: "${SMTP_PORTA:-587}"
+      # SMTP_USUARIO: "${SMTP_USUARIO:?defina SMTP_USUARIO no .env}"
+      # SMTP_SENHA: "${SMTP_SENHA:?defina SMTP_SENHA no .env}"
+      # SMTP_REMETENTE: "${SMTP_REMETENTE:?defina SMTP_REMETENTE no .env}"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M }
+
+  postgres:
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+
+# Dados no array local do host, em vez de volume anônimo no disco de sistema.
+# `type: none` + `o: bind` = bind declarado como volume nomeado (o que o padrão
+# permite). O tamanho fixo (teto 100%) vem do script de storage — ver topo.
+volumes:
+  pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:?defina DATA_DIR no .env}/postgres

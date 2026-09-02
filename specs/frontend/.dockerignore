@@ -1,0 +1,16 @@
+# O build do frontend faz `COPY . .` — sem este arquivo, tudo isso iria pra
+# dentro da imagem. Segredo (.env) e lixo pesado (node_modules) NUNCA entram.
+node_modules
+dist
+.env
+.env.*
+*.local
+*.log
+coverage
+.DS_Store
+Dockerfile
+.dockerignore
+# artefatos gerados pelo tsc que não devem ir pra imagem
+vite.config.js
+vite.config.d.ts
+*.tsbuildinfo

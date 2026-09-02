@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "node system-design/scripts/guards/proteger-arquivo.js", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node system-design/scripts/guards/bloquear-comando.js", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "node system-design/scripts/guards/verificar-segredo.js", "timeout": 10 },
+          { "type": "command", "command": "node system-design/scripts/guards/verificar-codigo.js", "timeout": 10 },
+          { "type": "command", "command": "node system-design/scripts/guards/verificar-dependencia.js", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
