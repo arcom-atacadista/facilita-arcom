@@ -18,6 +18,7 @@ import (
 	"facilitaarcom/internal/acesso"
 	"facilitaarcom/internal/cobranca"
 	"facilitaarcom/internal/config"
+	"facilitaarcom/internal/conversa"
 	"facilitaarcom/internal/disparo"
 	"facilitaarcom/internal/gatewayarcom"
 	"facilitaarcom/internal/negociacao"
@@ -40,6 +41,8 @@ type Servidor struct {
 	cobranca   *cobranca.Service
 	negociacao *negociacao.Service
 	disparo    *disparo.Service
+	conversa   *conversa.Service
+	webhook    *conversa.Webhook
 	gateway    *gatewayarcom.Cliente
 
 	// worker fica exposto para cmd/server iniciar e parar junto com o
@@ -91,8 +94,18 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 			}
 		}
 
-		s.disparo = disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, s.cobranca, canal, log)
+		s.conversa = conversa.NovoService(conversa.NovoRepo(gdb), log)
+
+		s.disparo = disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, s.cobranca, canal, s.conversa, log)
 		s.Worker = disparo.NovoWorker(s.disparo, log)
+
+		s.webhook = conversa.NovoWebhook(s.conversa, cfg.WhatsAppAppSecret, cfg.WhatsAppVerifyToken)
+		if !s.webhook.Configurado() {
+			// Sem segredo de assinatura a rota não é montada: um webhook
+			// público sem conferir assinatura aceitaria "mensagem de cliente"
+			// forjada por qualquer um.
+			log.Warn("webhook do WhatsApp desligado — defina WHATSAPP_APP_SECRET e WHATSAPP_VERIFY_TOKEN para receber resposta de cliente")
+		}
 	}
 
 	// Ordem importa: request id primeiro (todo log downstream referencia
@@ -117,7 +130,11 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 	s.router.Use(middleware.Compress(5))
 	s.router.Use(middleware.Timeout(30 * time.Second))
 	s.router.Use(limiteDeCorpo(1 << 20)) // 1 MB
-	s.router.Use(httprate.LimitBy(100, time.Minute, chaveDeCliente))
+	// O limite global protege as rotas de uso humano. O webhook da Meta é
+	// exceção: ela agrupa eventos e pode passar de 100 por minuto num pico, e
+	// evento descartado é resposta de cliente perdida. A rota tem limite
+	// próprio, bem mais folgado, dentro do grupo dela.
+	s.router.Use(exceto(caminhoDoWebhook, httprate.LimitBy(100, time.Minute, chaveDeCliente)))
 	s.router.Use(s.origemPermitida)
 	s.router.Use(headersSeguros(producao))
 
@@ -137,4 +154,23 @@ func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // dentro do próprio /64).
 func chaveDeCliente(r *http.Request) (string, error) {
 	return httprate.CanonicalizeIP(middleware.GetClientIP(r.Context())), nil
+}
+
+// caminhoDoWebhook é o caminho completo da rota que a Meta chama.
+const caminhoDoWebhook = "/api/v1" + conversa.CaminhoWebhook
+
+// exceto aplica um middleware em tudo, menos no caminho dado. Existe porque o
+// chi aplica middleware de raiz em toda a árvore, e o webhook precisa ficar
+// fora do limite de taxa pensado para navegador.
+func exceto(caminho string, mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		comMiddleware := mw(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == caminho {
+				next.ServeHTTP(w, r)
+				return
+			}
+			comMiddleware.ServeHTTP(w, r)
+		})
+	}
 }

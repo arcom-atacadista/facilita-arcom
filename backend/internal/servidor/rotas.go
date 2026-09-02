@@ -2,11 +2,14 @@ package servidor
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 
 	"facilitaarcom/internal/acesso"
 	"facilitaarcom/internal/cobranca"
+	"facilitaarcom/internal/conversa"
 	"facilitaarcom/internal/disparo"
 	"facilitaarcom/internal/negociacao"
 )
@@ -46,12 +49,24 @@ func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 	hCobranca := cobranca.NovoHandler(s.cobranca, s.H)
 	hNegociacao := negociacao.NovoHandler(s.negociacao, s.H)
 	hDisparo := disparo.NovoHandler(s.disparo, s.H)
+	hConversa := conversa.NovoHandler(s.conversa, s.H)
 
 	// Público. /sessao é login/logout/quem-sou-eu; /negociar é a tela que o
 	// cliente devedor abre pelo link do WhatsApp, sem conta — quem autoriza
 	// ali é a posse do token.
 	v1.Route("/sessao", hAcesso.RotasSessao)
 	v1.Route("/negociar", hNegociacao.Rotas)
+
+	// O webhook da Meta é público por natureza — quem autoriza é a assinatura
+	// do corpo, não uma sessão. Só é montado quando há segredo configurado.
+	if s.webhook.Configurado() {
+		v1.Group(func(g chi.Router) {
+			// Limite próprio e folgado: a Meta agrupa eventos, e descartar um
+			// evento é perder a resposta de um cliente.
+			g.Use(httprate.LimitByIP(1200, time.Minute))
+			s.webhook.Rotas(g)
+		})
+	}
 
 	// Privado: tudo daqui pra baixo exige cookie de sessão válido.
 	v1.Group(func(g chi.Router) {
@@ -62,5 +77,6 @@ func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 		g.Route("/politicas", hCobranca.RotasPoliticas)
 		g.Route("/acordos", hCobranca.RotasAcordos)
 		g.Route("/disparos", hDisparo.Rotas)
+		g.Route("/conversas", hConversa.Rotas)
 	})
 }

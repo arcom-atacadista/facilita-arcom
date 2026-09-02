@@ -39,21 +39,33 @@ var (
 	ErrForaDaRegua    = errors.New("dívida fora da régua de cobrança")
 )
 
+// Historico registra na conversa o que a régua mandou, para a mesa mostrar o
+// diálogo completo e não só o lado do cliente.
+//
+// É interface e não o serviço concreto para o disparo não depender do pacote
+// de conversa — e para o teste conseguir observar o registro sem banco.
+// Nulo desliga: a entrega continua funcionando, só não vira histórico.
+type Historico interface {
+	RegistrarDisparoEnviado(ctx context.Context, telefone, wamid, texto string) error
+}
+
 type Service struct {
-	repo     *Repo
-	cobranca *cobranca.Service
-	repoCob  *cobranca.Repo
-	canal    Canal
-	log      *slog.Logger
-	agora    func() time.Time
+	repo      *Repo
+	cobranca  *cobranca.Service
+	repoCob   *cobranca.Repo
+	canal     Canal
+	historico Historico
+	log       *slog.Logger
+	agora     func() time.Time
 }
 
 // NovoService recebe o canal de saída. canal nil é o estado atual do projeto
 // (ver canal.go): tudo funciona, a fila enche, e nada é enviado nem marcado
 // como enviado.
-func NovoService(repo *Repo, repoCob *cobranca.Repo, svcCob *cobranca.Service, canal Canal, log *slog.Logger) *Service {
+func NovoService(repo *Repo, repoCob *cobranca.Repo, svcCob *cobranca.Service, canal Canal, historico Historico, log *slog.Logger) *Service {
 	return &Service{
-		repo: repo, repoCob: repoCob, cobranca: svcCob, canal: canal, log: log,
+		repo: repo, repoCob: repoCob, cobranca: svcCob,
+		canal: canal, historico: historico, log: log,
 		agora: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -236,6 +248,14 @@ func (s *Service) entregar(ctx context.Context, d Disparo) bool {
 	if err == nil {
 		if err := s.repo.MarcarEnviado(ctx, d.ID, referencia, s.agora()); err != nil {
 			s.log.ErrorContext(ctx, "falha ao registrar disparo enviado", "erro", err, "disparo_id", d.ID)
+		}
+		// O histórico é conveniência da mesa: falhar aqui não pode desfazer
+		// um envio que já aconteceu de verdade.
+		if s.historico != nil {
+			if err := s.historico.RegistrarDisparoEnviado(ctx, d.Telefone, referencia, d.Mensagem); err != nil {
+				s.log.WarnContext(ctx, "disparo entregue mas não entrou no histórico da conversa",
+					"erro", err, "disparo_id", d.ID)
+			}
 		}
 		return true
 	}
