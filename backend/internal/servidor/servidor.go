@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	"facilitaarcom/internal/acesso"
 	"facilitaarcom/internal/config"
 )
 
@@ -26,6 +27,12 @@ type Servidor struct {
 	db     *gorm.DB
 	redis  *redis.Client
 	router chi.Router
+
+	// Serviços de feature. Ficam no Servidor porque rotas.go precisa deles
+	// para montar a árvore, e o middleware de sessão precisa do de acesso.
+	// Nulos quando o projeto sobe sem Postgres — rotas.go não monta as rotas
+	// de negócio nesse caso.
+	acesso *acesso.Service
 }
 
 // Novo monta o router com toda a stack de middleware e as rotas. Devolve
@@ -34,6 +41,10 @@ func Novo(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Client)
 	s := &Servidor{cfg: cfg, log: log, db: gdb, redis: rdb, router: chi.NewRouter()}
 
 	producao := cfg.Env == "production"
+
+	if gdb != nil {
+		s.acesso = acesso.NovoService(acesso.NovoRepo(gdb))
+	}
 
 	// Ordem importa: request id primeiro (todo log downstream referencia
 	// ele), recuperação de panic antes de qualquer coisa que possa

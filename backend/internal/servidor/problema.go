@@ -1,69 +1,38 @@
 package servidor
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
+
+	"facilitaarcom/internal/problema"
 )
 
-// Problema é a resposta de erro única do backend — ver padroes/09-contrato-api.md.
-// Content-Type: application/problem+json em toda resposta de erro.
-type Problema struct {
-	Type   string            `json:"type"`
-	Title  string            `json:"title"`
-	Status int               `json:"status"`
-	Detail string            `json:"detail"`
-	Codigo string            `json:"codigo"`
-	Campos map[string]string `json:"campos,omitempty"`
-}
+// O contrato de erro em si mora em internal/problema (ver o comentário de
+// pacote lá para o motivo). Estes aliases mantêm servidor.NaoEncontrado(...)
+// e servidor.ErroDominio válidos, como a skill novo-endpoint descreve.
+type (
+	Problema    = problema.Problema
+	ErroDominio = problema.ErroDominio
+)
 
-// ErroDominio é o erro que uma feature retorna quando já sabe o status/codigo
-// HTTP correto (não encontrado, conflito, validação...). Handlers devolvem
-// isto envolto com %w; o wrapper H() faz o resto.
-type ErroDominio struct {
-	Status int
-	Titulo string
-	Detail string
-	Codigo string
-	Campos map[string]string
-}
-
-func (e *ErroDominio) Error() string { return e.Detail }
-
-// Construtores dos erros de domínio mais comuns — usar estes em vez de criar
-// &ErroDominio{} solto em cada pacote, pra manter title/codigo consistentes.
-
-func NaoEncontrado(detalhe string) error {
-	return &ErroDominio{Status: http.StatusNotFound, Titulo: "Não encontrado", Detail: detalhe, Codigo: "nao_encontrado"}
-}
-
-func Conflito(detalhe string) error {
-	return &ErroDominio{Status: http.StatusConflict, Titulo: "Conflito", Detail: detalhe, Codigo: "conflito"}
-}
-
-func SemPermissao() error {
-	return &ErroDominio{Status: http.StatusForbidden, Titulo: "Sem permissão", Detail: "Você não tem acesso a este recurso.", Codigo: "sem_permissao"}
-}
-
-func NaoAutenticado(detalhe string) error {
-	return &ErroDominio{Status: http.StatusUnauthorized, Titulo: "Não autenticado", Detail: detalhe, Codigo: "token_ausente"}
-}
-
-// Validacao recebe um campo -> mensagem. Sempre 422.
-func Validacao(campos map[string]string) error {
-	return &ErroDominio{
-		Status: http.StatusUnprocessableEntity,
-		Titulo: "Dados inválidos",
-		Detail: "Um ou mais campos estão inválidos.",
-		Codigo: "validacao",
-		Campos: campos,
-	}
-}
+var (
+	NaoEncontrado  = problema.NaoEncontrado
+	Conflito       = problema.Conflito
+	SemPermissao   = problema.SemPermissao
+	NaoAutenticado = problema.NaoAutenticado
+	SessaoExpirada = problema.SessaoExpirada
+	Validacao      = problema.Validacao
+	UmCampo        = problema.UmCampo
+	Requisicao     = problema.Requisicao
+)
 
 // apiHandler é um handler que pode devolver erro — elimina o
 // `if err != nil { w.WriteHeader(500); return }` repetido em cada handler,
 // que é onde é fácil vazar detalhe interno sem querer.
-type apiHandler func(w http.ResponseWriter, r *http.Request) error
+// Alias (=) e não tipo próprio: rotas.go passa s.H para os pacotes de
+// feature montarem seus handlers, e um tipo nomeado aqui tornaria essa
+// passagem incompatível com a assinatura que a feature declara.
+type apiHandler = func(w http.ResponseWriter, r *http.Request) error
 
 // H adapta um apiHandler para http.HandlerFunc, convertendo erro em Problema
 // pelo único ponto de conversão do backend. Nenhum handler escreve JSON de
@@ -91,17 +60,7 @@ func (s *Servidor) tratarErro(w http.ResponseWriter, r *http.Request, err error)
 }
 
 func (s *Servidor) escreverProblema(w http.ResponseWriter, r *http.Request, status int, titulo, detalhe, codigo string, campos map[string]string) {
-	p := Problema{
-		Type:   "about:blank",
-		Title:  titulo,
-		Status: status,
-		Detail: detalhe,
-		Codigo: codigo,
-		Campos: campos,
-	}
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(p); err != nil {
+	if err := problema.Escrever(w, status, titulo, detalhe, codigo, campos); err != nil {
 		s.log.ErrorContext(r.Context(), "falha ao codificar problema", "erro", err)
 	}
 }
