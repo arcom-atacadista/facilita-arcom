@@ -78,6 +78,9 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 		// O Gateway é opcional: sem GATEWAY_ARCOM_API_KEY o client existe e
 		// cada chamada devolve ErrSemCredencial, que é o esperado em dev.
 		s.gateway = gatewayarcom.NovoCliente(cfg.GatewayArcomAPIKey)
+		if cfg.GatewayBaseURL != "" {
+			s.gateway = s.gateway.ComBaseURL(cfg.GatewayBaseURL)
+		}
 
 		mapeamento := gatewayarcom.MapeamentoPadrao()
 		if cfg.GatewayCampoVencimento != "" {
@@ -105,6 +108,7 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 				IDNumero:  cfg.WhatsAppIDNumero,
 				Token:     cfg.WhatsAppToken,
 				VersaoAPI: cfg.WhatsAppVersaoAPI,
+				BaseURL:   cfg.WhatsAppBaseURL,
 			})
 			if err != nil {
 				// Config.Load já garante que as duas variáveis vêm juntas, então

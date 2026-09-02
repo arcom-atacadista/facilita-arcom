@@ -57,11 +57,19 @@ type Config struct {
 	// Token combinado com a Meta no cadastro do webhook, conferido no
 	// handshake de verificação.
 	WhatsAppVerifyToken string
+	// Endereço da Graph API. Existe para apontar a um sandbox em
+	// homologação; em branco usa o da Meta. Vem de variável de ambiente
+	// (mesmo nível de confiança de DATABASE_URL), nunca de input de cliente.
+	WhatsAppBaseURL string
 
 	// Os dois campos do dataset `debitos` cuja semântica a documentação do
 	// Gateway ainda marca como "a revisar". Configuráveis para que a resposta
 	// do time de TI seja troca de variável de ambiente, e não novo deploy de
 	// código (ver internal/gatewayarcom/debitos.go).
+	// Endereço do Gateway. Mesma razão do WhatsAppBaseURL: apontar a um
+	// sandbox em homologação. Em branco usa o da ARCOM.
+	GatewayBaseURL string
+
 	GatewayCampoVencimento string
 	GatewayCampoValor      string
 
@@ -87,6 +95,7 @@ func Load() (*Config, error) {
 		AppURL:      env("APP_URL", "http://localhost:8080"),
 
 		GatewayArcomAPIKey:     os.Getenv("GATEWAY_ARCOM_API_KEY"),
+		GatewayBaseURL:         os.Getenv("GATEWAY_ARCOM_BASE_URL"),
 		GatewayCampoVencimento: os.Getenv("GATEWAY_CAMPO_VENCIMENTO"),
 		GatewayCampoValor:      os.Getenv("GATEWAY_CAMPO_VALOR"),
 		SincronizacaoHorario:   os.Getenv("SINCRONIZACAO_HORARIO"),
@@ -96,6 +105,7 @@ func Load() (*Config, error) {
 		WhatsAppVersaoAPI:   os.Getenv("WHATSAPP_API_VERSION"),
 		WhatsAppAppSecret:   os.Getenv("WHATSAPP_APP_SECRET"),
 		WhatsAppVerifyToken: os.Getenv("WHATSAPP_VERIFY_TOKEN"),
+		WhatsAppBaseURL:     os.Getenv("WHATSAPP_BASE_URL"),
 	}
 
 	var faltando []string

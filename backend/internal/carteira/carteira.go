@@ -138,6 +138,15 @@ func (s *Service) rodar(ctx context.Context, inicio time.Time) (Resultado, error
 		}
 	}
 
+	// Sem telefone não há para onde disparar, e o dataset `debitos` não traz
+	// nenhum. Esta etapa completa o cadastro a partir do histórico da Nines,
+	// que é o único lugar do Gateway com o número do devedor.
+	if err := s.completarTelefones(ctx); err != nil {
+		// Não derruba a rodada: a carteira já entrou e vale por si. Sem
+		// telefone o disparo é recusado com mensagem clara, na hora.
+		s.log.WarnContext(ctx, "não consegui completar os telefones pelo histórico da Nines", "erro", err)
+	}
+
 	fechadas, err := s.fecharAusentes(ctx, inicio)
 	if err != nil {
 		return res, err
@@ -264,6 +273,58 @@ func (s *Service) fecharAusentes(ctx context.Context, inicio time.Time) (int64, 
 		s.log.InfoContext(ctx, "dívidas fechadas por terem saído do Gateway", "quantidade", res.RowsAffected)
 	}
 	return res.RowsAffected, nil
+}
+
+// LoteDeTelefones é quantos disparos do histórico da Nines ler para
+// reconstruir a base de telefones.
+const LoteDeTelefones = 2000
+
+// completarTelefones preenche o telefone de quem está sem, usando o número
+// para onde a Nines já mandou mensagem.
+//
+// Só preenche o que está vazio: número corrigido à mão por um operador não
+// pode ser sobrescrito por um registro antigo do histórico.
+func (s *Service) completarTelefones(ctx context.Context) error {
+	var faltando []struct {
+		ID        string
+		Documento string
+	}
+	if err := s.db.WithContext(ctx).Raw(`
+		SELECT id::text AS id, documento FROM clientes
+		WHERE telefone IS NULL OR telefone = ''`).Scan(&faltando).Error; err != nil {
+		return err
+	}
+	if len(faltando) == 0 {
+		return nil
+	}
+
+	telefones, err := s.gateway.BuscarTelefonesDaNines(ctx, LoteDeTelefones)
+	if err != nil {
+		return err
+	}
+	if len(telefones) == 0 {
+		return nil
+	}
+
+	preenchidos := 0
+	for _, c := range faltando {
+		tel, achou := telefones[c.Documento]
+		if !achou {
+			continue
+		}
+		if err := s.db.WithContext(ctx).Exec(
+			`UPDATE clientes SET telefone = ?, atualizado_em = ? WHERE id = ?::uuid AND (telefone IS NULL OR telefone = '')`,
+			tel, s.agora(), c.ID).Error; err != nil {
+			return err
+		}
+		preenchidos++
+	}
+
+	if preenchidos > 0 {
+		s.log.InfoContext(ctx, "telefones completados pelo histórico da Nines",
+			"preenchidos", preenchidos, "sem_telefone", len(faltando)-preenchidos)
+	}
+	return nil
 }
 
 // --- registro das rodadas ---

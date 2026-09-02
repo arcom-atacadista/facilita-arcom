@@ -242,3 +242,80 @@ func somenteDigitos(s string) string {
 	}
 	return string(out)
 }
+
+// --- telefone do devedor ---
+//
+// O dataset `debitos` não traz telefone: nenhum dos campos documentados tem
+// contato do cliente. O único lugar do Gateway com o número do devedor é o
+// histórico da própria Nines (`disparo-mensagem-nines`), que guarda para onde
+// cada mensagem foi.
+//
+// Na prática isso é o que permite sair da Nines sem perder a base de
+// telefones: ela é reconstruída a partir do que já foi disparado.
+
+// DisparoNines é o subconjunto do histórico que interessa: para quem foi e
+// de quem era a inscrição.
+type DisparoNines struct {
+	DataDisparo string `json:"dataDisparo"`
+	// O nome do campo vem com a letra faltando na origem; mantido como está
+	// para casar com o que a API devolve.
+	NroIncricao string `json:"nroIncricao"`
+	Payload     struct {
+		Telefone     string `json:"telefone"`
+		PhoneNumber  string `json:"phone_number"`
+		Contato      string `json:"contato"`
+		Document     string `json:"document"`
+		NroInscricao string `json:"nroInscricao"`
+		Nome         string `json:"nome"`
+	} `json:"payload"`
+}
+
+// Documento devolve a inscrição do devedor, tentando os lugares onde ela
+// aparece no histórico.
+func (d DisparoNines) Documento() string {
+	return somenteDigitos(primeiroNaoVazio(d.NroIncricao, d.Payload.NroInscricao, d.Payload.Document))
+}
+
+// Telefone devolve o número para onde a mensagem foi.
+func (d DisparoNines) Telefone() string {
+	return somenteDigitos(primeiroNaoVazio(d.Payload.Telefone, d.Payload.PhoneNumber, d.Payload.Contato))
+}
+
+// BuscarTelefonesDaNines lê o histórico de disparos e devolve o mapa
+// documento -> telefone. Como a lista vem ordenada do mais recente para o
+// mais antigo na maioria das consultas, a primeira ocorrência de cada
+// documento é mantida — mas não dependemos disso: só sobrescrevemos quando o
+// registro é mais novo.
+func (c *Cliente) BuscarTelefonesDaNines(ctx context.Context, limite int) (map[string]string, error) {
+	filtros := url.Values{}
+	if limite > 0 {
+		filtros.Set("limite", strconv.Itoa(limite))
+	}
+	filtros.Set("ordenar_por", "dataDisparo")
+
+	corpo, err := c.Consultar(ctx, DatasetDisparosNines, filtros)
+	if err != nil {
+		return nil, err
+	}
+
+	var disparos []DisparoNines
+	if err := decodificarLista(corpo, &disparos); err != nil {
+		return nil, fmt.Errorf("ler histórico de disparos: %w", err)
+	}
+
+	telefones := make(map[string]string, len(disparos))
+	maisRecente := make(map[string]string, len(disparos))
+
+	for _, d := range disparos {
+		doc, tel := d.Documento(), d.Telefone()
+		if doc == "" || tel == "" {
+			continue
+		}
+		if anterior, existe := maisRecente[doc]; existe && anterior >= d.DataDisparo {
+			continue
+		}
+		telefones[doc] = tel
+		maisRecente[doc] = d.DataDisparo
+	}
+	return telefones, nil
+}

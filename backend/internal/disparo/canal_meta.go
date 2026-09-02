@@ -42,7 +42,8 @@ type ConfigMeta struct {
 	Token string
 	// VersaoAPI no formato vNN.N. Vazio usa o padrão abaixo.
 	VersaoAPI string
-	// BaseURL só é preenchida em teste, para apontar a um servidor falso.
+	// BaseURL aponta a Graph API para outro endereço — usado em teste e para
+	// homologar contra um sandbox. Em branco usa a da Meta.
 	BaseURL string
 }
 

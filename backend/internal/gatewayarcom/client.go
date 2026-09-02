@@ -98,10 +98,10 @@ func (c *Cliente) TemCredencial() bool { return c.apiKey != "" }
 
 // ComBaseURL devolve uma cópia do client apontando para outro endereço.
 //
-// Existe para teste: em produção a base é sempre BaseURL, e é justamente por
-// ela ser constante que esta superfície não tem SSRF. Um teste que aponta
-// para httptest não muda essa garantia, porque o endereço nunca vem de input
-// de cliente.
+// Serve para teste e para homologar contra um sandbox. Não abre SSRF: o
+// endereço vem de configuração do processo (mesmo nível de confiança de
+// DATABASE_URL), nunca de input de cliente — que é o que a regra de
+// 12-gateway-arcom.md proíbe.
 func (c *Cliente) ComBaseURL(base string) *Cliente {
 	copia := *c
 	copia.base = strings.TrimRight(base, "/")
