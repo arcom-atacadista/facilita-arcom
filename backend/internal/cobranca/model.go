@@ -8,6 +8,9 @@
 package cobranca
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -91,18 +94,62 @@ type Politica struct {
 func (Politica) TableName() string { return "politicas" }
 
 type Campanha struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Nome         string
-	FaixaMin     int `gorm:"column:faixa_min"`
-	FaixaMax     int `gorm:"column:faixa_max"`
-	Canal        string
-	Template     string
+	ID       uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Nome     string
+	FaixaMin int `gorm:"column:faixa_min"`
+	FaixaMax int `gorm:"column:faixa_max"`
+	Canal    string
+	// Template é o texto que a gente monta — vale como registro e como o que
+	// o operador vê. Não é o que a Meta recebe.
+	Template string
+	// TemplateMeta é o nome do template como foi aprovado na Meta; Parametros
+	// é a ordem em que nossas variáveis entram nos marcadores {{1}}, {{2}}...
+	TemplateMeta *string `gorm:"column:template_meta"`
+	Idioma       string
+	Parametros   ListaParametros `gorm:"column:parametros;type:jsonb"`
 	Ativo        bool
 	CriadoEm     time.Time `gorm:"column:criado_em"`
 	AtualizadoEm time.Time `gorm:"column:atualizado_em"`
 }
 
 func (Campanha) TableName() string { return "campanhas" }
+
+// ListaParametros é a ordem dos marcadores do template. Guardada em JSONB
+// porque o allowlist da stack só traz o driver pgx via gorm, e o array nativo
+// do Postgres exigiria uma biblioteca a mais só para converter.
+type ListaParametros []string
+
+func (l ListaParametros) Value() (driver.Value, error) {
+	if l == nil {
+		return "[]", nil
+	}
+	bruto, err := json.Marshal([]string(l))
+	if err != nil {
+		return nil, fmt.Errorf("serializar parâmetros do template: %w", err)
+	}
+	return string(bruto), nil
+}
+
+func (l *ListaParametros) Scan(valor any) error {
+	if valor == nil {
+		*l = nil
+		return nil
+	}
+	var bruto []byte
+	switch v := valor.(type) {
+	case []byte:
+		bruto = v
+	case string:
+		bruto = []byte(v)
+	default:
+		return fmt.Errorf("parâmetros do template em tipo inesperado: %T", valor)
+	}
+	if len(bruto) == 0 {
+		*l = nil
+		return nil
+	}
+	return json.Unmarshal(bruto, (*[]string)(l))
+}
 
 const (
 	StatusAcordoAtivo     = "ativo"

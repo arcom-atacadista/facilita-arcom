@@ -72,10 +72,26 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 		// cada chamada devolve ErrSemCredencial, que é o esperado em dev.
 		s.gateway = gatewayarcom.NovoCliente(cfg.GatewayArcomAPIKey)
 
-		// canal nil: não existe canal de envio aprovado ainda. A fila
-		// funciona, nada é entregue e nada é marcado como entregue.
-		// Ver internal/disparo/canal.go.
-		s.disparo = disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, s.cobranca, nil, log)
+		// O canal só existe quando as credenciais da Meta estão configuradas.
+		// Sem elas o serviço roda com canal nulo: a fila funciona, nada é
+		// entregue e — importante — nada é marcado como entregue.
+		var canal disparo.Canal
+		if cfg.WhatsAppIDNumero != "" && cfg.WhatsAppToken != "" {
+			c, err := disparo.NovoCanalMeta(disparo.ConfigMeta{
+				IDNumero:  cfg.WhatsAppIDNumero,
+				Token:     cfg.WhatsAppToken,
+				VersaoAPI: cfg.WhatsAppVersaoAPI,
+			})
+			if err != nil {
+				// Config.Load já garante que as duas variáveis vêm juntas, então
+				// chegar aqui com erro é bug de programação, não de ambiente.
+				log.Error("canal do WhatsApp mal configurado — a fila vai encher sem enviar", "erro", err)
+			} else {
+				canal = c
+			}
+		}
+
+		s.disparo = disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, s.cobranca, canal, log)
 		s.Worker = disparo.NovoWorker(s.disparo, log)
 	}
 

@@ -3,6 +3,8 @@
 package disparo
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -19,12 +21,57 @@ const (
 	StatusCancelado = "cancelado"
 )
 
+// Parametros são os valores do template na ordem dos marcadores da Meta.
+//
+// Guardado como JSONB e não como text[] do Postgres porque o allowlist da
+// stack só admite o driver pgx via gorm, e o array nativo precisaria de uma
+// biblioteca a mais só para converter. JSON resolve com a stdlib, e a ordem
+// — que é o que importa aqui — é preservada igual.
+type Parametros []string
+
+func (p Parametros) Value() (driver.Value, error) {
+	if p == nil {
+		return "[]", nil
+	}
+	bruto, err := json.Marshal([]string(p))
+	if err != nil {
+		return nil, fmt.Errorf("serializar parâmetros do template: %w", err)
+	}
+	return string(bruto), nil
+}
+
+func (p *Parametros) Scan(valor any) error {
+	if valor == nil {
+		*p = nil
+		return nil
+	}
+
+	var bruto []byte
+	switch v := valor.(type) {
+	case []byte:
+		bruto = v
+	case string:
+		bruto = []byte(v)
+	default:
+		return fmt.Errorf("parâmetros do template em tipo inesperado: %T", valor)
+	}
+
+	if len(bruto) == 0 {
+		*p = nil
+		return nil
+	}
+	return json.Unmarshal(bruto, (*[]string)(p))
+}
+
 type Disparo struct {
 	ID                uuid.UUID  `gorm:"type:uuid;primaryKey"`
 	DividaID          uuid.UUID  `gorm:"type:uuid;column:divida_id"`
 	CampanhaID        *uuid.UUID `gorm:"type:uuid;column:campanha_id"`
 	Telefone          string
 	Mensagem          string
+	TemplateMeta      *string `gorm:"column:template_meta"`
+	Idioma            string
+	Parametros        Parametros `gorm:"column:parametros;type:jsonb"`
 	Canal             string
 	Status            string
 	Tentativas        int

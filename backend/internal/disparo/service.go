@@ -121,14 +121,22 @@ func (s *Service) Enfileirar(ctx context.Context, u acesso.Usuario, dividaID uui
 		return Disparo{}, err
 	}
 
-	texto := MontarMensagem(campanha.Template, Variaveis{
+	variaveis := Variaveis{
 		Tratamento:   cobranca.NomeDeTratamento(d.Cliente.Nome, d.Cliente.Documento),
 		NomeCompleto: d.Cliente.Nome,
 		Contrato:     d.Contrato,
 		Dias:         dias,
 		Valor:        d.ValorOriginal,
 		Link:         link,
-	})
+	}
+	texto := MontarMensagem(campanha.Template, variaveis)
+
+	// Os parâmetros vão na ordem que a campanha declara, porque é essa a
+	// ordem dos marcadores {{1}}, {{2}}... no template aprovado na Meta.
+	parametros, err := ValoresNaOrdem(campanha.Parametros, variaveis)
+	if err != nil {
+		return Disparo{}, err
+	}
 
 	disparo := Disparo{
 		ID:           uuid.New(),
@@ -136,6 +144,9 @@ func (s *Service) Enfileirar(ctx context.Context, u acesso.Usuario, dividaID uui
 		CampanhaID:   &campanha.ID,
 		Telefone:     telefone,
 		Mensagem:     texto,
+		TemplateMeta: campanha.TemplateMeta,
+		Idioma:       idiomaOu(campanha.Idioma),
+		Parametros:   parametros,
 		Canal:        s.NomeDoCanal(),
 		Status:       StatusNaFila,
 		AgendadoPara: agora,
@@ -211,7 +222,15 @@ func (s *Service) ProcessarFila(ctx context.Context) (int, error) {
 }
 
 func (s *Service) entregar(ctx context.Context, d Disparo) bool {
-	msg := Mensagem{Telefone: d.Telefone, Texto: d.Mensagem}
+	msg := Mensagem{
+		Telefone:   d.Telefone,
+		Texto:      d.Mensagem,
+		Idioma:     d.Idioma,
+		Parametros: d.Parametros,
+	}
+	if d.TemplateMeta != nil {
+		msg.Template = *d.TemplateMeta
+	}
 
 	referencia, err := s.canal.Enviar(ctx, msg)
 	if err == nil {
@@ -225,6 +244,17 @@ func (s *Service) entregar(ctx context.Context, d Disparo) bool {
 	// gravada: erro_detalhe aparece na tela do operador.
 	s.log.ErrorContext(ctx, "falha ao enviar disparo", "erro", err, "disparo_id", d.ID, "mensagem", msg)
 
+	// Recusa permanente (template não aprovado, número inválido, token
+	// expirado) não melhora com nova tentativa: insistir três vezes só gasta
+	// tempo e enche o log. Vai direto para erro, com o motivo à vista.
+	var permanente *ErroMeta
+	if errors.As(err, &permanente) && permanente.Permanente {
+		if err := s.repo.MarcarErro(ctx, d.ID, motivoDoErro(permanente), nil); err != nil {
+			s.log.ErrorContext(ctx, "falha ao registrar erro permanente de disparo", "erro", err, "disparo_id", d.ID)
+		}
+		return false
+	}
+
 	var proxima *time.Time
 	if d.Tentativas < MaxTentativas {
 		// Backoff exponencial simples: 5, 10, 20 minutos.
@@ -233,8 +263,70 @@ func (s *Service) entregar(ctx context.Context, d Disparo) bool {
 		proxima = &t
 	}
 
-	if err := s.repo.MarcarErro(ctx, d.ID, "falha na entrega pelo canal de mensagem", proxima); err != nil {
+	if err := s.repo.MarcarErro(ctx, d.ID, motivoDoErro(err), proxima); err != nil {
 		s.log.ErrorContext(ctx, "falha ao registrar erro de disparo", "erro", err, "disparo_id", d.ID)
 	}
 	return false
+}
+
+// idiomaOu garante um idioma válido mesmo em campanha antiga sem a coluna
+// preenchida.
+func idiomaOu(idioma string) string {
+	if idioma == "" {
+		return "pt_BR"
+	}
+	return idioma
+}
+
+// motivoDoErro é o texto curto que vai para a tela do operador. Erro da Meta
+// vira uma explicação acionável; qualquer outro fica genérico, porque o
+// detalhe pode carregar dado interno e já está no log.
+func motivoDoErro(err error) string {
+	var meta *ErroMeta
+	if !errors.As(err, &meta) {
+		return "falha na entrega pelo canal de mensagem"
+	}
+
+	switch {
+	case meta.Codigo == 190:
+		return "credencial do WhatsApp expirada — renovar o token com o time de TI"
+	case meta.Codigo == 131026:
+		return "número não recebe mensagem no WhatsApp"
+	case meta.Codigo >= 132000 && meta.Codigo <= 132015:
+		return "template não aprovado na Meta ou com número de parâmetros diferente do cadastrado"
+	case meta.Status == 429:
+		return "limite de envio da Meta atingido — será tentado de novo"
+	default:
+		return fmt.Sprintf("a Meta recusou o envio (código %d)", meta.Codigo)
+	}
+}
+
+// ValoresNaOrdem resolve os nomes declarados na campanha para os valores
+// daquele disparo, na ordem dos marcadores do template.
+//
+// Nome desconhecido é erro, e não string vazia: um template aprovado com
+// cinco marcadores recebendo um parâmetro em branco é recusado pela Meta com
+// uma mensagem genérica, e o rastro se perde. Melhor falhar no
+// enfileiramento, onde dá para ver qual campanha está mal configurada.
+func ValoresNaOrdem(nomes []string, v Variaveis) ([]string, error) {
+	valores := make([]string, 0, len(nomes))
+	for _, nome := range nomes {
+		switch nome {
+		case "nome":
+			valores = append(valores, v.Tratamento)
+		case "nome_completo":
+			valores = append(valores, v.NomeCompleto)
+		case "contrato":
+			valores = append(valores, v.Contrato)
+		case "dias":
+			valores = append(valores, fmt.Sprintf("%d", v.Dias))
+		case "valor":
+			valores = append(valores, Moeda(v.Valor))
+		case "link":
+			valores = append(valores, v.Link)
+		default:
+			return nil, fmt.Errorf("campanha declara o parâmetro %q, que não existe", nome)
+		}
+	}
+	return valores, nil
 }

@@ -47,11 +47,28 @@ type Canal interface {
 	Enviar(ctx context.Context, m Mensagem) (referencia string, err error)
 }
 
-// Mensagem é o que sai pelo canal. Telefone já normalizado em dígitos com
-// DDI, texto já montado a partir do template da campanha.
+// Mensagem é o que sai pelo canal.
+//
+// Fora de uma janela de atendimento aberta, a Meta não aceita texto livre —
+// só um template aprovado, pelo nome, com os valores em ordem para os
+// marcadores {{1}}, {{2}}, ... Por isso Texto NÃO é o que viaja na chamada:
+// ele é o registro do que foi montado, para o operador ver na tela e para a
+// auditoria. Quem vai para a Meta é Template + Parametros.
 type Mensagem struct {
+	// Telefone já normalizado em dígitos com DDI (ver TelefoneComDDI).
 	Telefone string
-	Texto    string
+
+	// Texto montado a partir do template da campanha — registro, não payload.
+	Texto string
+
+	// Template é o nome como foi aprovado na Meta.
+	Template string
+
+	// Idioma no formato da Meta, ex.: pt_BR.
+	Idioma string
+
+	// Parametros são os valores na ordem dos marcadores do template.
+	Parametros []string
 }
 
 // LogValue mascara o telefone: é dado pessoal de devedor e não vai cru pro

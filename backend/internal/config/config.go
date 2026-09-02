@@ -45,6 +45,19 @@ type Config struct {
 	// sobe normalmente.
 	GatewayArcomAPIKey string
 
+	// WhatsApp: credenciais da Cloud API da Meta, provisionadas junto com a
+	// conta WhatsApp Business da ARCOM. Vazias em dev de propósito — sem
+	// elas o sistema sobe normalmente, a fila de disparo funciona e nada é
+	// enviado nem marcado como enviado (ver internal/disparo/canal.go).
+	WhatsAppIDNumero  string
+	WhatsAppToken     string
+	WhatsAppVersaoAPI string
+	// Segredo da aplicação, usado para conferir a assinatura dos webhooks.
+	WhatsAppAppSecret string
+	// Token combinado com a Meta no cadastro do webhook, conferido no
+	// handshake de verificação.
+	WhatsAppVerifyToken string
+
 	// AppURL é o endereço público da aplicação, usado para montar o link de
 	// negociação que vai na mensagem ao cliente. Precisa ser absoluto: o link
 	// é aberto do WhatsApp, fora do contexto do site.
@@ -64,6 +77,12 @@ func Load() (*Config, error) {
 		AppURL:      env("APP_URL", "http://localhost:8080"),
 
 		GatewayArcomAPIKey: os.Getenv("GATEWAY_ARCOM_API_KEY"),
+
+		WhatsAppIDNumero:    os.Getenv("WHATSAPP_PHONE_NUMBER_ID"),
+		WhatsAppToken:       os.Getenv("WHATSAPP_ACCESS_TOKEN"),
+		WhatsAppVersaoAPI:   os.Getenv("WHATSAPP_API_VERSION"),
+		WhatsAppAppSecret:   os.Getenv("WHATSAPP_APP_SECRET"),
+		WhatsAppVerifyToken: os.Getenv("WHATSAPP_VERIFY_TOKEN"),
 	}
 
 	var faltando []string
@@ -78,6 +97,19 @@ func Load() (*Config, error) {
 	// WhatsApp do cliente — melhor recusar subir do que descobrir depois.
 	if u, err := url.Parse(cfg.AppURL); err != nil || u.Scheme == "" || u.Host == "" {
 		faltando = append(faltando, "APP_URL precisa ser uma URL absoluta (ex.: https://facilita.arcom.com.br)")
+	}
+
+	// As credenciais do WhatsApp vêm em conjunto: com uma só delas, o envio
+	// falharia em toda mensagem no meio da operação. Melhor recusar subir.
+	temIDNumero, temToken := cfg.WhatsAppIDNumero != "", cfg.WhatsAppToken != ""
+	if temIDNumero != temToken {
+		faltando = append(faltando,
+			"WHATSAPP_PHONE_NUMBER_ID e WHATSAPP_ACCESS_TOKEN andam juntos: defina as duas ou nenhuma")
+	}
+	// Webhook sem segredo de assinatura aceitaria evento forjado de qualquer
+	// origem; sem verify token o cadastro na Meta nem se completa.
+	if cfg.WhatsAppAppSecret != "" && cfg.WhatsAppVerifyToken == "" {
+		faltando = append(faltando, "WHATSAPP_APP_SECRET definido exige WHATSAPP_VERIFY_TOKEN")
 	}
 
 	if len(faltando) > 0 {
