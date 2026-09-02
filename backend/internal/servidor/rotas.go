@@ -7,6 +7,7 @@ import (
 
 	"facilitaarcom/internal/acesso"
 	"facilitaarcom/internal/cobranca"
+	"facilitaarcom/internal/disparo"
 	"facilitaarcom/internal/negociacao"
 )
 
@@ -44,6 +45,7 @@ func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 	hAcesso := acesso.NovoHandler(s.acesso, producao, s.H)
 	hCobranca := cobranca.NovoHandler(s.cobranca, s.H)
 	hNegociacao := negociacao.NovoHandler(s.negociacao, s.H)
+	hDisparo := disparo.NovoHandler(s.disparo, s.H)
 
 	// Público. /sessao é login/logout/quem-sou-eu; /negociar é a tela que o
 	// cliente devedor abre pelo link do WhatsApp, sem conta — quem autoriza
@@ -59,5 +61,6 @@ func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 		g.Route("/carteira", hCobranca.RotasCarteira)
 		g.Route("/politicas", hCobranca.RotasPoliticas)
 		g.Route("/acordos", hCobranca.RotasAcordos)
+		g.Route("/disparos", hDisparo.Rotas)
 	})
 }

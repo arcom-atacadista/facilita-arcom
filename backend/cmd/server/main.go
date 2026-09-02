@@ -42,11 +42,19 @@ func executar(log *slog.Logger) error {
 		return err
 	}
 
-	handler := servidor.Novo(cfg, log, gdb, rdb)
+	app := servidor.Montar(cfg, log, gdb, rdb)
+
+	// O worker da régua de cobrança sobe junto com o servidor. Sem Postgres
+	// não existe fila, então não existe worker (ver 07-frontend-primeiro.md).
+	if app.Worker != nil {
+		if err := app.Worker.Iniciar(); err != nil {
+			return err
+		}
+	}
 
 	srv := &http.Server{
 		Addr:    "0.0.0.0:" + cfg.Port,
-		Handler: handler,
+		Handler: app,
 		// Timeouts contra slowloris e cliente lento — sem isso uma conexão
 		// parada em aberto consome uma goroutine pra sempre.
 		ReadHeaderTimeout: 5 * time.Second,
@@ -78,6 +86,13 @@ func executar(log *slog.Logger) error {
 	log.Info("sinal de encerramento recebido, drenando requisições em andamento")
 	desligarCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// O worker para antes do HTTP: uma rodada de disparo no meio do caminho
+	// deve terminar de registrar o que já entregou, senão a mensagem sai e o
+	// banco não sabe.
+	if app.Worker != nil {
+		app.Worker.Parar(desligarCtx)
+	}
 
 	if err := srv.Shutdown(desligarCtx); err != nil {
 		return err

@@ -73,6 +73,14 @@ services:
     environment:
       DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD:-app}@postgres:5432/app"
       PORT: "3000"
+      # Endereço público da aplicação. Entra no link de negociação que vai na
+      # mensagem ao cliente, então precisa ser o endereço que ele consegue
+      # abrir do celular — em produção, o domínio real (ver .env.prod).
+      APP_URL: "${APP_URL:-http://localhost:8080}"
+      # Credencial do Gateway de dados da ARCOM. Vazia em dev de propósito: a
+      # chave só existe em produção, provisionada pelo time de TI
+      # (system-design/padroes/12-gateway-arcom.md).
+      GATEWAY_ARCOM_API_KEY: "${GATEWAY_ARCOM_API_KEY:-}"
     expose: ["3000"]
     depends_on:
       postgres: { condition: service_healthy }

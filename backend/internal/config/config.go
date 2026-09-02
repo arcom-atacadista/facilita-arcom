@@ -38,6 +38,13 @@ type Config struct {
 	// template e a validação de tamanho continua valendo se alguém definir.
 	JWTSecret string
 
+	// GatewayArcomAPIKey é a credencial do Gateway de dados da ARCOM. Vazia
+	// em dev de propósito: a chave só existe em produção, provisionada pelo
+	// time de TI (ver system-design/padroes/12-gateway-arcom.md). Sem ela a
+	// consulta ao Gateway falha com uma mensagem clara, e o resto do sistema
+	// sobe normalmente.
+	GatewayArcomAPIKey string
+
 	// AppURL é o endereço público da aplicação, usado para montar o link de
 	// negociação que vai na mensagem ao cliente. Precisa ser absoluto: o link
 	// é aberto do WhatsApp, fora do contexto do site.
@@ -55,6 +62,8 @@ func Load() (*Config, error) {
 		RedisURL:    os.Getenv("REDIS_URL"),
 		JWTSecret:   os.Getenv("JWT_SECRET"),
 		AppURL:      env("APP_URL", "http://localhost:8080"),
+
+		GatewayArcomAPIKey: os.Getenv("GATEWAY_ARCOM_API_KEY"),
 	}
 
 	var faltando []string

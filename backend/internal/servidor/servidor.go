@@ -18,6 +18,8 @@ import (
 	"facilitaarcom/internal/acesso"
 	"facilitaarcom/internal/cobranca"
 	"facilitaarcom/internal/config"
+	"facilitaarcom/internal/disparo"
+	"facilitaarcom/internal/gatewayarcom"
 	"facilitaarcom/internal/negociacao"
 )
 
@@ -37,11 +39,24 @@ type Servidor struct {
 	acesso     *acesso.Service
 	cobranca   *cobranca.Service
 	negociacao *negociacao.Service
+	disparo    *disparo.Service
+	gateway    *gatewayarcom.Cliente
+
+	// worker fica exposto para cmd/server iniciar e parar junto com o
+	// http.Server — o servidor monta, quem controla o ciclo de vida é o main.
+	Worker *disparo.Worker
 }
 
-// Novo monta o router com toda a stack de middleware e as rotas. Devolve
-// http.Handler — cmd/server só chama Novo(...) e sobe um http.Server em cima.
+// Novo monta o router e devolve http.Handler — é o que os testes usam quando
+// só interessa bater nas rotas.
 func Novo(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Client) http.Handler {
+	return Montar(cfg, log, gdb, rdb)
+}
+
+// Montar devolve o *Servidor concreto. cmd/server usa esta versão porque
+// precisa do Worker de disparo para iniciar e parar junto com o http.Server —
+// o servidor monta as dependências, quem controla ciclo de vida é o main.
+func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Client) *Servidor {
 	s := &Servidor{cfg: cfg, log: log, db: gdb, redis: rdb, router: chi.NewRouter()}
 
 	producao := cfg.Env == "production"
@@ -52,6 +67,16 @@ func Novo(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Client)
 		repoCobranca := cobranca.NovoRepo(gdb)
 		s.cobranca = cobranca.NovoService(repoCobranca, cfg.AppURL)
 		s.negociacao = negociacao.NovoService(repoCobranca, s.cobranca)
+
+		// O Gateway é opcional: sem GATEWAY_ARCOM_API_KEY o client existe e
+		// cada chamada devolve ErrSemCredencial, que é o esperado em dev.
+		s.gateway = gatewayarcom.NovoCliente(cfg.GatewayArcomAPIKey)
+
+		// canal nil: não existe canal de envio aprovado ainda. A fila
+		// funciona, nada é entregue e nada é marcado como entregue.
+		// Ver internal/disparo/canal.go.
+		s.disparo = disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, s.cobranca, nil, log)
+		s.Worker = disparo.NovoWorker(s.disparo, log)
 	}
 
 	// Ordem importa: request id primeiro (todo log downstream referencia
@@ -82,7 +107,12 @@ func Novo(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Client)
 
 	s.rotas()
 
-	return s.router
+	return s
+}
+
+// ServeHTTP faz do Servidor um http.Handler — o router é detalhe interno.
+func (s *Servidor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.router.ServeHTTP(w, r)
 }
 
 // chaveDeCliente é a chave usada pelo rate limit — o IP resolvido por
