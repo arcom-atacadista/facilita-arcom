@@ -41,7 +41,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - meu-projeto
+        - facilitaarcom
 
 # Linters deixados de fora de propósito: funlen, cyclop, wrapcheck, dupl,
 # gochecknoglobals — em código gerado por IA para um público não-técnico,

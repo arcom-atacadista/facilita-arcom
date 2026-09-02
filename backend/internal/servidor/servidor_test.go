@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"meu-projeto/internal/config"
-	"meu-projeto/internal/servidor"
+	"facilitaarcom/internal/config"
+	"facilitaarcom/internal/servidor"
 )
 
 // novoServidorDeTeste monta o handler completo (router + middlewares) sem

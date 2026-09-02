@@ -15,8 +15,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registra o driver "pgx" pro database/sql
 
-	"meu-projeto/internal/config"
-	"meu-projeto/internal/db"
+	"facilitaarcom/internal/config"
+	"facilitaarcom/internal/db"
 )
 
 func main() {

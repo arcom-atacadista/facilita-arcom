@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"meu-projeto/internal/db"
+	"facilitaarcom/internal/db"
 )
 
 // saude é o liveness — GET /api/health. Só responde 200 se o processo está

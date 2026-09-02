@@ -1,4 +1,4 @@
-module meu-projeto
+module facilitaarcom
 
 go 1.25.0
 

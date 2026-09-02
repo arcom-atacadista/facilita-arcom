@@ -9,9 +9,13 @@ Thumbs.db
 # node / frontend
 node_modules/
 dist/
+frontend/vite.config.js
+frontend/vite.config.d.ts
 *.tsbuildinfo
 
 # go / backend
+/backend/server
+/backend/migrate
 *.exe
 
 # ambiente

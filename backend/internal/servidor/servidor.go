@@ -15,7 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
-	"meu-projeto/internal/config"
+	"facilitaarcom/internal/config"
 )
 
 // Servidor guarda as dependências que os handlers precisam. Injeção manual

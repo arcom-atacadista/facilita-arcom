@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"meu-projeto/internal/config"
-	"meu-projeto/internal/db"
-	"meu-projeto/internal/servidor"
+	"facilitaarcom/internal/config"
+	"facilitaarcom/internal/db"
+	"facilitaarcom/internal/servidor"
 )
 
 func main() {

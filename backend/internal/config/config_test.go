@@ -3,7 +3,7 @@ package config_test
 import (
 	"testing"
 
-	"meu-projeto/internal/config"
+	"facilitaarcom/internal/config"
 )
 
 func TestLoadFalhaComJWTSecretCurto(t *testing.T) {
