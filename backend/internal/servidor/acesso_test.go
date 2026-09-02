@@ -62,11 +62,18 @@ func bancoDeTeste(t *testing.T) *gorm.DB {
 	return gdb
 }
 
-func servidorComBanco(t *testing.T) http.Handler {
+func montarServidor(t *testing.T) (http.Handler, *gorm.DB) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := &config.Config{Env: "development", Port: "3000"}
-	return servidor.Novo(cfg, log, bancoDeTeste(t), nil)
+	cfg := &config.Config{Env: "development", Port: "3000", AppURL: "https://facilita.arcom.com.br"}
+	gdb := bancoDeTeste(t)
+	return servidor.Novo(cfg, log, gdb, nil), gdb
+}
+
+func servidorComBanco(t *testing.T) http.Handler {
+	t.Helper()
+	h, _ := montarServidor(t)
+	return h
 }
 
 func chamar(t *testing.T, h http.Handler, metodo, caminho string, corpo any, cookies ...*http.Cookie) *httptest.ResponseRecorder {

@@ -16,7 +16,9 @@ import (
 	"gorm.io/gorm"
 
 	"facilitaarcom/internal/acesso"
+	"facilitaarcom/internal/cobranca"
 	"facilitaarcom/internal/config"
+	"facilitaarcom/internal/negociacao"
 )
 
 // Servidor guarda as dependências que os handlers precisam. Injeção manual
@@ -32,7 +34,9 @@ type Servidor struct {
 	// para montar a árvore, e o middleware de sessão precisa do de acesso.
 	// Nulos quando o projeto sobe sem Postgres — rotas.go não monta as rotas
 	// de negócio nesse caso.
-	acesso *acesso.Service
+	acesso     *acesso.Service
+	cobranca   *cobranca.Service
+	negociacao *negociacao.Service
 }
 
 // Novo monta o router com toda a stack de middleware e as rotas. Devolve
@@ -44,6 +48,10 @@ func Novo(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Client)
 
 	if gdb != nil {
 		s.acesso = acesso.NovoService(acesso.NovoRepo(gdb))
+
+		repoCobranca := cobranca.NovoRepo(gdb)
+		s.cobranca = cobranca.NovoService(repoCobranca, cfg.AppURL)
+		s.negociacao = negociacao.NovoService(repoCobranca, s.cobranca)
 	}
 
 	// Ordem importa: request id primeiro (todo log downstream referencia

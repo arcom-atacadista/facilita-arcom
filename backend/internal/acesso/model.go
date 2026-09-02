@@ -71,9 +71,12 @@ type Usuario struct {
 	Papel        Papel  `gorm:"type:papel_usuario"`
 	Equipe       Equipe `gorm:"type:equipe_usuario"`
 	Ativo        bool
-	AlcadaMaxima float64   `gorm:"column:alcada_maxima"`
-	CriadoEm     time.Time `gorm:"column:criado_em"`
-	AtualizadoEm time.Time `gorm:"column:atualizado_em"`
+	AlcadaMaxima float64 `gorm:"column:alcada_maxima"`
+	// Casa com dividas.responsavel_cobranca. Vazio = sem carteira própria;
+	// quem não vê a carteira inteira e não tem código não vê dívida nenhuma.
+	CodigoCobranca *string   `gorm:"column:codigo_cobranca"`
+	CriadoEm       time.Time `gorm:"column:criado_em"`
+	AtualizadoEm   time.Time `gorm:"column:atualizado_em"`
 }
 
 func (Usuario) TableName() string { return "usuarios" }
@@ -112,11 +115,12 @@ func (e EntradaLogin) LogValue() slog.Value {
 }
 
 type EntradaCriarUsuario struct {
-	Nome   string `json:"nome" validate:"required,min=2,max=120"`
-	Email  string `json:"email" validate:"required,email,max=255"`
-	Senha  string `json:"senha" validate:"required,min=10,max=200"`
-	Papel  Papel  `json:"papel" validate:"required"`
-	Equipe Equipe `json:"equipe" validate:"required"`
+	Nome           string  `json:"nome" validate:"required,min=2,max=120"`
+	Email          string  `json:"email" validate:"required,email,max=255"`
+	Senha          string  `json:"senha" validate:"required,min=10,max=200"`
+	Papel          Papel   `json:"papel" validate:"required"`
+	Equipe         Equipe  `json:"equipe" validate:"required"`
+	CodigoCobranca *string `json:"codigoCobranca" validate:"omitempty,max=60"`
 }
 
 func (e EntradaCriarUsuario) LogValue() slog.Value {
@@ -124,11 +128,12 @@ func (e EntradaCriarUsuario) LogValue() slog.Value {
 }
 
 type EntradaAtualizarUsuario struct {
-	Nome         *string  `json:"nome" validate:"omitempty,min=2,max=120"`
-	Papel        *Papel   `json:"papel"`
-	Equipe       *Equipe  `json:"equipe"`
-	Ativo        *bool    `json:"ativo"`
-	AlcadaMaxima *float64 `json:"alcadaMaxima" validate:"omitempty,gte=0,lte=100"`
+	Nome           *string  `json:"nome" validate:"omitempty,min=2,max=120"`
+	Papel          *Papel   `json:"papel"`
+	Equipe         *Equipe  `json:"equipe"`
+	Ativo          *bool    `json:"ativo"`
+	AlcadaMaxima   *float64 `json:"alcadaMaxima" validate:"omitempty,gte=0,lte=100"`
+	CodigoCobranca *string  `json:"codigoCobranca" validate:"omitempty,max=60"`
 }
 
 // --- DTOs de saída ---
@@ -136,25 +141,27 @@ type EntradaAtualizarUsuario struct {
 // UsuarioResposta é o que sai na API. Nunca inclui senha_hash — por isso é um
 // tipo à parte, e não o Usuario com `json:"-"` (fácil de quebrar sem notar).
 type UsuarioResposta struct {
-	ID           uuid.UUID `json:"id"`
-	Nome         string    `json:"nome"`
-	Email        string    `json:"email"`
-	Papel        Papel     `json:"papel"`
-	Equipe       Equipe    `json:"equipe"`
-	Ativo        bool      `json:"ativo"`
-	AlcadaMaxima float64   `json:"alcadaMaxima"`
-	CriadoEm     time.Time `json:"criadoEm"`
+	ID             uuid.UUID `json:"id"`
+	Nome           string    `json:"nome"`
+	Email          string    `json:"email"`
+	Papel          Papel     `json:"papel"`
+	Equipe         Equipe    `json:"equipe"`
+	Ativo          bool      `json:"ativo"`
+	AlcadaMaxima   float64   `json:"alcadaMaxima"`
+	CodigoCobranca *string   `json:"codigoCobranca"`
+	CriadoEm       time.Time `json:"criadoEm"`
 }
 
 func Responder(u Usuario) UsuarioResposta {
 	return UsuarioResposta{
-		ID:           u.ID,
-		Nome:         u.Nome,
-		Email:        u.Email,
-		Papel:        u.Papel,
-		Equipe:       u.Equipe,
-		Ativo:        u.Ativo,
-		AlcadaMaxima: u.AlcadaMaxima,
-		CriadoEm:     u.CriadoEm,
+		ID:             u.ID,
+		Nome:           u.Nome,
+		Email:          u.Email,
+		Papel:          u.Papel,
+		Equipe:         u.Equipe,
+		Ativo:          u.Ativo,
+		AlcadaMaxima:   u.AlcadaMaxima,
+		CodigoCobranca: u.CodigoCobranca,
+		CriadoEm:       u.CriadoEm,
 	}
 }

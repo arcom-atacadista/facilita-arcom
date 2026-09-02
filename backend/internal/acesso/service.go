@@ -149,16 +149,17 @@ func (s *Service) Criar(ctx context.Context, entrada EntradaCriarUsuario) (Usuar
 
 	agora := time.Now().UTC()
 	u := Usuario{
-		ID:           uuid.New(),
-		Nome:         strings.TrimSpace(entrada.Nome),
-		Email:        strings.ToLower(strings.TrimSpace(entrada.Email)),
-		SenhaHash:    string(hash),
-		Papel:        entrada.Papel,
-		Equipe:       entrada.Equipe,
-		Ativo:        true,
-		AlcadaMaxima: AlcadaPadrao[entrada.Papel],
-		CriadoEm:     agora,
-		AtualizadoEm: agora,
+		ID:             uuid.New(),
+		Nome:           strings.TrimSpace(entrada.Nome),
+		Email:          strings.ToLower(strings.TrimSpace(entrada.Email)),
+		SenhaHash:      string(hash),
+		Papel:          entrada.Papel,
+		Equipe:         entrada.Equipe,
+		Ativo:          true,
+		AlcadaMaxima:   AlcadaPadrao[entrada.Papel],
+		CodigoCobranca: entrada.CodigoCobranca,
+		CriadoEm:       agora,
+		AtualizadoEm:   agora,
 	}
 
 	if err := s.repo.Criar(ctx, &u); err != nil {
@@ -245,6 +246,9 @@ func (s *Service) Atualizar(ctx context.Context, quemPede Usuario, id uuid.UUID,
 	}
 	if entrada.Ativo != nil {
 		u.Ativo = *entrada.Ativo
+	}
+	if entrada.CodigoCobranca != nil {
+		u.CodigoCobranca = entrada.CodigoCobranca
 	}
 
 	if err := s.repo.Salvar(ctx, &u); err != nil {

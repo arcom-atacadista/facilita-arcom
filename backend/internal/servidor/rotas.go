@@ -6,6 +6,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"facilitaarcom/internal/acesso"
+	"facilitaarcom/internal/cobranca"
+	"facilitaarcom/internal/negociacao"
 )
 
 // rotas monta toda a árvore de rotas num lugar só — mais fácil de auditar do
@@ -40,14 +42,22 @@ func (s *Servidor) rotas() {
 func (s *Servidor) rotasDeNegocio(v1 chi.Router) {
 	producao := s.cfg.Env == "production"
 	hAcesso := acesso.NovoHandler(s.acesso, producao, s.H)
+	hCobranca := cobranca.NovoHandler(s.cobranca, s.H)
+	hNegociacao := negociacao.NovoHandler(s.negociacao, s.H)
 
-	// Público. /sessao é login/logout/quem-sou-eu; a negociação por token é a
-	// tela que o cliente devedor abre pelo link do WhatsApp, sem conta.
+	// Público. /sessao é login/logout/quem-sou-eu; /negociar é a tela que o
+	// cliente devedor abre pelo link do WhatsApp, sem conta — quem autoriza
+	// ali é a posse do token.
 	v1.Route("/sessao", hAcesso.RotasSessao)
+	v1.Route("/negociar", hNegociacao.Rotas)
 
 	// Privado: tudo daqui pra baixo exige cookie de sessão válido.
 	v1.Group(func(g chi.Router) {
 		g.Use(s.acesso.ExigirSessao)
+
 		g.Route("/usuarios", hAcesso.RotasUsuarios)
+		g.Route("/carteira", hCobranca.RotasCarteira)
+		g.Route("/politicas", hCobranca.RotasPoliticas)
+		g.Route("/acordos", hCobranca.RotasAcordos)
 	})
 }

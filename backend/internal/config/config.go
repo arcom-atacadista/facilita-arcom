@@ -8,6 +8,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -31,7 +32,16 @@ type Config struct {
 	// JWTSecret só é obrigatório quando a feature de autenticação existe no
 	// projeto (ver .claude/skills/autenticacao). Enquanto não houver login,
 	// fica vazio e ninguém lê.
+	//
+	// O Facilita ARCOM não usa JWT: a sessão é token opaco registrado no
+	// Postgres (ver internal/acesso). A variável segue aqui porque é do
+	// template e a validação de tamanho continua valendo se alguém definir.
 	JWTSecret string
+
+	// AppURL é o endereço público da aplicação, usado para montar o link de
+	// negociação que vai na mensagem ao cliente. Precisa ser absoluto: o link
+	// é aberto do WhatsApp, fora do contexto do site.
+	AppURL string
 }
 
 // Load lê e valida o ambiente. Retorna erro (em vez de sair do processo) para
@@ -44,6 +54,7 @@ func Load() (*Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		RedisURL:    os.Getenv("REDIS_URL"),
 		JWTSecret:   os.Getenv("JWT_SECRET"),
+		AppURL:      env("APP_URL", "http://localhost:8080"),
 	}
 
 	var faltando []string
@@ -52,6 +63,12 @@ func Load() (*Config, error) {
 	// segredo curto sobe silenciosamente até alguém forjar um token.
 	if cfg.JWTSecret != "" && len(cfg.JWTSecret) < 32 {
 		faltando = append(faltando, "JWT_SECRET precisa ter pelo menos 32 caracteres (gere com: openssl rand -base64 48)")
+	}
+
+	// Link de negociação com endereço relativo ou malformado chega quebrado no
+	// WhatsApp do cliente — melhor recusar subir do que descobrir depois.
+	if u, err := url.Parse(cfg.AppURL); err != nil || u.Scheme == "" || u.Host == "" {
+		faltando = append(faltando, "APP_URL precisa ser uma URL absoluta (ex.: https://facilita.arcom.com.br)")
 	}
 
 	if len(faltando) > 0 {
