@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"facilitaarcom/internal/acesso"
 	"facilitaarcom/internal/config"
 	"facilitaarcom/internal/db"
 	"facilitaarcom/internal/servidor"
@@ -38,7 +39,24 @@ func bancoDeTeste(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("abrir postgres de teste: %v", err)
 	}
+
+	// Uma conexão só: o lock consultivo abaixo é por conexão, e com um pool
+	// o driver poderia entregar outra conexão (sem o lock) para a consulta
+	// seguinte.
+	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	// Estes testes limpam as tabelas e repovoam. Duas execuções ao mesmo
+	// tempo no mesmo banco — dois terminais, ou uma execução do pacote junto
+	// com um `go test ./...` — truncariam os dados uma da outra, e a falha
+	// aparece como "duplicated key" ou violação de chave estrangeira em
+	// testes que não têm nada a ver com isso.
+	//
+	// O lock consultivo serializa: a segunda execução espera a vez em vez de
+	// corromper. É liberado quando a conexão fecha, no Cleanup acima.
+	if _, err := sqlDB.Exec(`SELECT pg_advisory_lock(875123401)`); err != nil {
+		t.Fatalf("obter lock do banco de teste: %v", err)
+	}
 
 	goose.SetBaseFS(db.Migrations)
 	if err := goose.SetDialect("postgres"); err != nil {
@@ -53,6 +71,11 @@ func bancoDeTeste(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("abrir gorm: %v", err)
 	}
+
+	// bcrypt cost 12 é o de produção; aqui ele só faria a suíte demorar (sob
+	// o detector de corrida, minutos por teste). O que estes testes exercitam
+	// é o fluxo de sessão, não a força do hash.
+	t.Cleanup(acesso.UsarCustoDeHashReduzido())
 
 	// Cada teste começa com as tabelas de gente vazias. RESTART IDENTITY
 	// CASCADE limpa também o que referencia usuários.

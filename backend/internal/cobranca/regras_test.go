@@ -234,3 +234,44 @@ func TestOfertaNuncaOferecePrestacaoAbaixoDoPiso(t *testing.T) {
 		}
 	}
 }
+
+// A carteira da ARCOM é quase toda pessoa jurídica. Chamar "Mercado do João
+// LTDA" de "Mercado" — o que a regra de primeiro nome fazia — não identifica
+// a empresa e parece erro do sistema na mensagem que o cliente recebe.
+func TestNomeDeTratamento(t *testing.T) {
+	casos := []struct {
+		nome      string
+		documento string
+		quer      string
+	}{
+		// Pessoa física: primeiro nome.
+		{"Maria Souza Oliveira", "12345678901", "Maria"},
+		{"João", "12345678901", "João"},
+
+		// Empresa: razão social sem a forma jurídica.
+		{"Mercado do João LTDA", "12345678000199", "Mercado do João"},
+		{"Padaria Estrela ME", "12.345.678/0001-99", "Padaria Estrela"},
+		{"Distribuidora Alfa EIRELI", "12345678000199", "Distribuidora Alfa"},
+		{"Comercial Beta S/A", "12345678000199", "Comercial Beta"},
+		{"Atacado Gama LTDA ME", "12345678000199", "Atacado Gama"},
+		{"Supermercados Delta", "12345678000199", "Supermercados Delta"},
+
+		// Sem documento reconhecível, trata como empresa: errar para o nome
+		// completo é menos ruim do que cortar na primeira palavra.
+		{"Mercado do João LTDA", "", "Mercado do João"},
+
+		// Nome vazio nunca vira mensagem começando com "Olá ,".
+		{"", "12345678901", "Cliente"},
+		{"   ", "12345678000199", "Cliente"},
+
+		// Empresa cujo nome inteiro é a forma jurídica: não sobra nada para
+		// cortar, e devolver vazio seria pior que devolver o original.
+		{"LTDA", "12345678000199", "LTDA"},
+	}
+
+	for _, c := range casos {
+		if got := cobranca.NomeDeTratamento(c.nome, c.documento); got != c.quer {
+			t.Errorf("NomeDeTratamento(%q, %q) = %q, quer %q", c.nome, c.documento, got, c.quer)
+		}
+	}
+}

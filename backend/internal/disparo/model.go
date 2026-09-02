@@ -95,11 +95,16 @@ func TelefoneValido(comDDI string) bool {
 
 // Variaveis são os valores que o template da campanha aceita.
 type Variaveis struct {
-	Nome     string
-	Contrato string
-	Dias     int
-	Valor    float64
-	Link     string
+	// Tratamento é como o cliente é chamado ({nome} no template) — já
+	// resolvido por cobranca.NomeDeTratamento, que sabe diferenciar pessoa de
+	// empresa.
+	Tratamento string
+	// NomeCompleto alimenta {nome_completo}.
+	NomeCompleto string
+	Contrato     string
+	Dias         int
+	Valor        float64
+	Link         string
 }
 
 // MontarMensagem troca os marcadores do template. Só os marcadores conhecidos
@@ -108,21 +113,14 @@ type Variaveis struct {
 // código.
 func MontarMensagem(template string, v Variaveis) string {
 	substituicoes := []string{
-		"{nome}", primeiroNome(v.Nome),
-		"{nome_completo}", v.Nome,
+		"{nome}", v.Tratamento,
+		"{nome_completo}", v.NomeCompleto,
 		"{contrato}", v.Contrato,
 		"{dias}", fmt.Sprintf("%d", v.Dias),
 		"{valor}", Moeda(v.Valor),
 		"{link}", v.Link,
 	}
 	return strings.NewReplacer(substituicoes...).Replace(template)
-}
-
-func primeiroNome(nome string) string {
-	if partes := strings.Fields(nome); len(partes) > 0 {
-		return partes[0]
-	}
-	return nome
 }
 
 // Moeda formata em real brasileiro. Feito à mão porque a stdlib do Go não tem

@@ -2,6 +2,8 @@ package cobranca
 
 import (
 	"math"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -151,4 +153,58 @@ func VencimentosDasParcelas(inicio time.Time, n int) []time.Time {
 		datas[i] = time.Date(base.Year(), base.Month()+time.Month(i), base.Day()+3, 0, 0, 0, 0, time.UTC)
 	}
 	return datas
+}
+
+// sufixosSocietarios são as formas jurídicas que aparecem no fim da razão
+// social e não fazem parte do nome pelo qual a empresa é conhecida.
+var sufixosSocietarios = []string{
+	"ltda", "ltda.", "me", "epp", "eireli", "sa", "s.a", "s.a.", "s/a",
+	"mei", "cia", "cia.", "eirelli",
+}
+
+// NomeDeTratamento é como o cliente é chamado na mensagem e na tela pública.
+//
+// A regra depende de quem é o devedor, e a carteira da ARCOM é quase toda
+// pessoa jurídica:
+//
+//   - CPF: primeiro nome ("Maria Souza Oliveira" -> "Maria"). É o tratamento
+//     natural e evita expor o nome completo a quem tiver o link.
+//   - CNPJ: a razão social sem a forma jurídica ("Mercado do João LTDA" ->
+//     "Mercado do João"). Cortar na primeira palavra devolveria "Mercado",
+//     que não identifica a empresa e soa como erro do sistema.
+func NomeDeTratamento(nome, documento string) string {
+	nome = strings.TrimSpace(nome)
+	if nome == "" {
+		return "Cliente"
+	}
+
+	palavras := strings.Fields(nome)
+	if len(palavras) == 0 {
+		return "Cliente"
+	}
+
+	// Sem documento reconhecível, trata como empresa: errar para o nome
+	// completo é menos ruim do que chamar uma empresa pela primeira palavra.
+	if len(somenteDigitos(documento)) == 11 {
+		return palavras[0]
+	}
+
+	for len(palavras) > 1 {
+		ultima := strings.ToLower(strings.TrimSuffix(palavras[len(palavras)-1], ","))
+		if !slices.Contains(sufixosSocietarios, ultima) {
+			break
+		}
+		palavras = palavras[:len(palavras)-1]
+	}
+	return strings.Join(palavras, " ")
+}
+
+func somenteDigitos(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

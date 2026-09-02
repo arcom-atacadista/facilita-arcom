@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -94,7 +93,7 @@ func (s *Service) Consultar(ctx context.Context, token string) (Proposta, error)
 	}
 
 	p := Proposta{
-		Cliente:       primeiroNome(d),
+		Cliente:       tratamento(d),
 		Contrato:      d.Contrato,
 		ValorOriginal: d.ValorOriginal,
 		Vencimento:    d.Vencimento.Format(cobranca.FormatoData),
@@ -108,17 +107,16 @@ func (s *Service) Consultar(ctx context.Context, token string) (Proposta, error)
 	return p, nil
 }
 
-// primeiroNome devolve só o primeiro nome. O suficiente pra pessoa reconhecer
-// que a proposta é dela, sem expor o nome completo a quem tiver o link.
-func primeiroNome(d cobranca.Divida) string {
+// tratamento é como o cliente é chamado na tela. Pessoa física aparece só
+// pelo primeiro nome — o bastante pra reconhecer que a proposta é dela, sem
+// expor o nome completo a quem tiver o link. Empresa aparece pela razão
+// social sem a forma jurídica, porque a carteira da ARCOM é quase toda PJ e
+// cortar na primeira palavra não identificaria ninguém.
+func tratamento(d cobranca.Divida) string {
 	if d.Cliente == nil {
 		return "Cliente"
 	}
-	partes := strings.Fields(d.Cliente.Nome)
-	if len(partes) == 0 {
-		return "Cliente"
-	}
-	return partes[0]
+	return cobranca.NomeDeTratamento(d.Cliente.Nome, d.Cliente.Documento)
 }
 
 func (s *Service) Aceitar(ctx context.Context, token string, e EntradaAceite) (cobranca.AcordoResposta, error) {

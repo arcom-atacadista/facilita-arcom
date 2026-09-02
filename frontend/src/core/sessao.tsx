@@ -8,15 +8,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { api, configurarApi } from "./api";
 import { notificar } from "./toast";
+import type { Usuario } from "../tipos/api";
 
-// Ajuste os campos conforme o projeto — o que importa é o formato do
-// contrato: sempre o retorno mais recente do backend, nunca algo
-// recalculado/guardado no front.
-export type Usuario = {
-  id: string;
-  nome: string;
-  email: string;
-};
+// O usuário da sessão vem do contrato da API (src/tipos/api.ts). Papel e
+// alçada chegam sempre do backend, nunca são guardados nem recalculados aqui:
+// esconder um botão é conveniência, quem decide acesso é a rota do servidor.
+export type { Usuario } from "../tipos/api";
 
 const CHAVE_SESSAO = ["sessao"] as const;
 
@@ -71,8 +68,7 @@ export function RotaProtegida() {
   const location = useLocation();
 
   if (carregando) return null;
-  if (!usuario)
-    return <Navigate to="/login" state={{ de: location }} replace />;
+  if (!usuario) return <Navigate to="/entrar" state={{ de: location }} replace />;
 
   return <Outlet />;
 }

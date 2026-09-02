@@ -70,11 +70,12 @@ func TestMontarMensagemTrocaOsMarcadores(t *testing.T) {
 	template := "Olá {nome}, o contrato {contrato} está com {dias} dias de atraso ({valor}). Negocie: {link}"
 
 	got := disparo.MontarMensagem(template, disparo.Variaveis{
-		Nome:     "Maria Souza Oliveira",
-		Contrato: "CT-1001",
-		Dias:     42,
-		Valor:    1250.90,
-		Link:     "https://facilita.arcom.com.br/negociar/abc",
+		Tratamento:   "Maria",
+		NomeCompleto: "Maria Souza Oliveira",
+		Contrato:     "CT-1001",
+		Dias:         42,
+		Valor:        1250.90,
+		Link:         "https://facilita.arcom.com.br/negociar/abc",
 	})
 
 	quer := "Olá Maria, o contrato CT-1001 está com 42 dias de atraso (R$ 1.250,90). " +
@@ -91,7 +92,10 @@ func TestMontarMensagemTrocaOsMarcadores(t *testing.T) {
 }
 
 func TestMontarMensagemAceitaNomeCompleto(t *testing.T) {
-	got := disparo.MontarMensagem("{nome} / {nome_completo}", disparo.Variaveis{Nome: "Maria Souza Oliveira"})
+	got := disparo.MontarMensagem("{nome} / {nome_completo}", disparo.Variaveis{
+		Tratamento:   "Maria",
+		NomeCompleto: "Maria Souza Oliveira",
+	})
 	if got != "Maria / Maria Souza Oliveira" {
 		t.Errorf("got %q", got)
 	}
@@ -107,7 +111,7 @@ func TestMontarMensagemNaoInterpretaOTemplate(t *testing.T) {
 	}
 
 	for _, template := range casos {
-		got := disparo.MontarMensagem(template, disparo.Variaveis{Nome: "Ana"})
+		got := disparo.MontarMensagem(template, disparo.Variaveis{Tratamento: "Ana"})
 		if strings.Contains(template, "{desconto_inexistente}") && !strings.Contains(got, "{desconto_inexistente}") {
 			t.Errorf("marcador desconhecido foi consumido: %q -> %q", template, got)
 		}
@@ -115,7 +119,7 @@ func TestMontarMensagemNaoInterpretaOTemplate(t *testing.T) {
 
 	// {{nome}} contém {nome}, então a substituição interna acontece — o que
 	// interessa é que o texto ao redor sobreviva.
-	if got := disparo.MontarMensagem("Chaves {{nome}}", disparo.Variaveis{Nome: "Ana Paula"}); got != "Chaves {Ana}" {
+	if got := disparo.MontarMensagem("Chaves {{nome}}", disparo.Variaveis{Tratamento: "Ana"}); got != "Chaves {Ana}" {
 		t.Errorf("got %q", got)
 	}
 }

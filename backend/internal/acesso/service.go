@@ -14,10 +14,26 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const (
-	// Cost 12 em vez do default (10) — exigência de 03-backend.md.
-	custoBcrypt = 12
+// CustoBcryptPadrao é o custo de produção: 12 em vez do default do pacote
+// (10), exigência de system-design/padroes/03-backend.md.
+const CustoBcryptPadrao = 12
 
+// custoBcrypt é variável, e não constante, só por causa dos testes: com custo
+// 12 cada hash leva ~250ms, e sob o detector de corrida passa de vários
+// segundos — a suíte de integração inteira levaria mais de dez minutos, o que
+// faria ninguém rodar `go test -race`. Produção nunca mexe nisto; quem baixa
+// é UsarCustoDeHashReduzido, chamado apenas de teste.
+var custoBcrypt = CustoBcryptPadrao
+
+// UsarCustoDeHashReduzido baixa o custo do bcrypt e devolve a função que
+// restaura o valor de produção. Existe exclusivamente para os testes de
+// integração; num binário servindo tráfego ninguém a chama.
+func UsarCustoDeHashReduzido() func() {
+	custoBcrypt = bcrypt.MinCost
+	return func() { custoBcrypt = CustoBcryptPadrao }
+}
+
+const (
 	// 32 bytes de crypto/rand = 256 bits de entropia, bem acima do piso de
 	// 128 bits que a skill de autenticação pede pra token opaco.
 	bytesToken = 32
@@ -31,6 +47,9 @@ const (
 // para gastar o mesmo tempo de CPU quando o e-mail não existe: sem isso, o
 // login responde na hora para e-mail inexistente e devagar para e-mail real,
 // e essa diferença de tempo entrega quem tem conta na empresa.
+//
+// O custo embutido aqui (12) tem que ser o mesmo de custoBcrypt — um hash de
+// custo menor gastaria menos tempo e a defesa deixaria de valer.
 var hashDescarte = []byte("$2a$12$C6UzMDM.H6dfI/f/IKcEe.Ke5FbxdVJDdVQEP0Ck6Ub4H0Sc8/PGm")
 
 // ErrCredenciaisInvalidas é único de propósito: o handler nunca diz se errou
@@ -44,6 +63,21 @@ func NovoService(repo *Repo) *Service { return &Service{repo: repo} }
 // hashDoToken é o que vai pro banco. SHA-256 (e não bcrypt) porque o token
 // já é aleatório de 256 bits — não há o que forçar por dicionário, e a
 // verificação acontece em toda requisição autenticada.
+// hashDeDescarte acompanha o custo vigente. Com o custo reduzido dos testes,
+// o hash fixo de custo 12 tornaria o caminho do e-mail inexistente MUITO mais
+// lento que o do e-mail real — a diferença de tempo que a defesa existe para
+// eliminar, invertida.
+func hashDeDescarte() []byte {
+	if custoBcrypt == CustoBcryptPadrao {
+		return hashDescarte
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte("descarte"), custoBcrypt)
+	if err != nil {
+		return hashDescarte
+	}
+	return h
+}
+
 func hashDoToken(token string) []byte {
 	soma := sha256.Sum256([]byte(token))
 	return soma[:]
@@ -64,7 +98,7 @@ func (s *Service) Autenticar(ctx context.Context, entrada EntradaLogin) (Usuario
 	if err != nil {
 		if errors.Is(err, ErrNaoEncontrado) {
 			// Gasta o mesmo tempo do caminho feliz antes de recusar.
-			_ = bcrypt.CompareHashAndPassword(hashDescarte, []byte(entrada.Senha))
+			_ = bcrypt.CompareHashAndPassword(hashDeDescarte(), []byte(entrada.Senha))
 			return Usuario{}, "", ErrCredenciaisInvalidas
 		}
 		return Usuario{}, "", err

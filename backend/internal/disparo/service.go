@@ -122,11 +122,12 @@ func (s *Service) Enfileirar(ctx context.Context, u acesso.Usuario, dividaID uui
 	}
 
 	texto := MontarMensagem(campanha.Template, Variaveis{
-		Nome:     d.Cliente.Nome,
-		Contrato: d.Contrato,
-		Dias:     dias,
-		Valor:    d.ValorOriginal,
-		Link:     link,
+		Tratamento:   cobranca.NomeDeTratamento(d.Cliente.Nome, d.Cliente.Documento),
+		NomeCompleto: d.Cliente.Nome,
+		Contrato:     d.Contrato,
+		Dias:         dias,
+		Valor:        d.ValorOriginal,
+		Link:         link,
 	})
 
 	disparo := Disparo{
