@@ -72,7 +72,7 @@ services:
   frontend:
     restart: always
     ports: !override
-      - "127.0.0.1:${PORT_FRONTEND:?defina PORT_FRONTEND no .env}:8080"
+      - "0.0.0.0:${PORT_FRONTEND:?defina PORT_FRONTEND no .env}:8080"
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
