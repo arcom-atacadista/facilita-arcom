@@ -119,7 +119,15 @@ func Montar(cfg *config.Config, log *slog.Logger, gdb *gorm.DB, rdb *redis.Clien
 			}
 		}
 
-		s.conversa = conversa.NovoService(conversa.NovoRepo(gdb), log)
+		// A mesa responde pelo mesmo canal da régua. Sem credencial da Meta ela
+		// fica em modo leitura: mostra o que o cliente escreveu e recusa a
+		// resposta com erro claro. O if evita guardar uma interface não-nula
+		// com ponteiro nulo dentro, que faria a checagem de "tem canal?" mentir.
+		var saida conversa.Saida
+		if canal != nil {
+			saida = disparo.NovoTextoLivre(canal)
+		}
+		s.conversa = conversa.NovoService(conversa.NovoRepo(gdb), saida, log)
 
 		s.disparo = disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, s.cobranca, canal, s.conversa, log)
 		s.Worker = disparo.NovoWorker(s.disparo, log)

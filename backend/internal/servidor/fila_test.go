@@ -55,7 +55,7 @@ func filaComCanal(t *testing.T, canal disparo.Canal) (http.Handler, *disparo.Ser
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	repoCobranca := cobranca.NovoRepo(gdb)
 	svcCobranca := cobranca.NovoService(repoCobranca, "https://facilita.arcom.com.br")
-	fila := disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, svcCobranca, canal, conversa.NovoService(conversa.NovoRepo(gdb), log), log)
+	fila := disparo.NovoService(disparo.NovoRepo(gdb), repoCobranca, svcCobranca, canal, conversa.NovoService(conversa.NovoRepo(gdb), nil, log), log)
 
 	return h, fila, cookie, gdb
 }

@@ -47,6 +47,14 @@ func Conflito(detalhe string) error {
 	return &ErroDominio{Status: http.StatusConflict, Titulo: "Conflito", Detail: detalhe, Codigo: "conflito"}
 }
 
+// ConflitoComCodigo é o mesmo 409 com código próprio, para a tela distinguir
+// conflitos que pedem reações diferentes — "a janela de atendimento fechou,
+// use a régua" não é a mesma coisa que "o envio não está configurado", e o
+// código genérico "conflito" obrigaria o frontend a comparar texto.
+func ConflitoComCodigo(detalhe, codigo string) error {
+	return &ErroDominio{Status: http.StatusConflict, Titulo: "Conflito", Detail: detalhe, Codigo: codigo}
+}
+
 func SemPermissao() error {
 	return &ErroDominio{Status: http.StatusForbidden, Titulo: "Sem permissão", Detail: "Você não tem acesso a este recurso.", Codigo: "sem_permissao"}
 }

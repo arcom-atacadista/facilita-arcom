@@ -80,12 +80,24 @@ func (c *canalMeta) Nome() string { return "whatsapp" }
 
 // --- corpo da requisição ---
 
+// Template e Text são ponteiros e omitempty porque a Meta recusa a requisição
+// que traz o campo do tipo errado — um "template": {} vazio num envio de texto
+// é 400, não é ignorado.
 type corpoEnvio struct {
-	MessagingProduct string        `json:"messaging_product"`
-	RecipientType    string        `json:"recipient_type"`
-	To               string        `json:"to"`
-	Type             string        `json:"type"`
-	Template         corpoTemplate `json:"template"`
+	MessagingProduct string         `json:"messaging_product"`
+	RecipientType    string         `json:"recipient_type"`
+	To               string         `json:"to"`
+	Type             string         `json:"type"`
+	Template         *corpoTemplate `json:"template,omitempty"`
+	Text             *corpoTexto    `json:"text,omitempty"`
+}
+
+type corpoTexto struct {
+	Body string `json:"body"`
+	// A Meta transforma link em prévia por padrão. Desligado: a mensagem da
+	// mesa costuma levar o link de negociação, e a prévia de uma página que
+	// exige token mostraria um cartão vazio ao cliente.
+	PreviewURL bool `json:"preview_url"`
 }
 
 type corpoTemplate struct {
@@ -173,6 +185,16 @@ func limparParametro(v string) string {
 }
 
 func (c *canalMeta) Enviar(ctx context.Context, m Mensagem) (string, error) {
+	if m.Livre {
+		return c.enviarCorpo(ctx, corpoEnvio{
+			MessagingProduct: "whatsapp",
+			RecipientType:    "individual",
+			To:               m.Telefone,
+			Type:             "text",
+			Text:             &corpoTexto{Body: m.Texto},
+		})
+	}
+
 	if m.Template == "" {
 		return "", errors.New("disparo sem template aprovado — a Meta não aceita texto livre fora da janela de atendimento")
 	}
@@ -187,20 +209,26 @@ func (c *canalMeta) Enviar(ctx context.Context, m Mensagem) (string, error) {
 		parametros = append(parametros, corpoParametro{Type: "text", Text: limparParametro(valor)})
 	}
 
-	corpo := corpoEnvio{
+	template := corpoTemplate{
+		Name:     m.Template,
+		Language: corpoIdioma{Code: idioma},
+	}
+	if len(parametros) > 0 {
+		template.Components = []corpoComponente{{Type: "body", Parameters: parametros}}
+	}
+
+	return c.enviarCorpo(ctx, corpoEnvio{
 		MessagingProduct: "whatsapp",
 		RecipientType:    "individual",
 		To:               m.Telefone,
 		Type:             "template",
-		Template: corpoTemplate{
-			Name:     m.Template,
-			Language: corpoIdioma{Code: idioma},
-		},
-	}
-	if len(parametros) > 0 {
-		corpo.Template.Components = []corpoComponente{{Type: "body", Parameters: parametros}}
-	}
+		Template:         &template,
+	})
+}
 
+// enviarCorpo faz a chamada em si. Template e texto livre só diferem no corpo;
+// autenticação, leitura da resposta e classificação de erro são as mesmas.
+func (c *canalMeta) enviarCorpo(ctx context.Context, corpo corpoEnvio) (string, error) {
 	bruto, err := json.Marshal(corpo)
 	if err != nil {
 		return "", fmt.Errorf("serializar envio: %w", err)

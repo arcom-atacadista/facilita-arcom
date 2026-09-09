@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,14 +13,29 @@ import (
 	"facilitaarcom/internal/acesso"
 )
 
+// Saida entrega a resposta do analista ao cliente.
+//
+// É interface, e não o canal concreto do pacote de disparo, pelo mesmo motivo
+// do Historico de lá: mesa e régua compartilham o mesmo canal sem que um
+// pacote passe a depender do outro, e o teste observa a resposta sem falar com
+// a Meta.
+//
+// Nula deixa a mesa em modo leitura — o analista lê o que o cliente escreveu e
+// a tentativa de responder é recusada com erro claro, em vez de a resposta
+// desaparecer em silêncio.
+type Saida interface {
+	EnviarTextoLivre(ctx context.Context, telefone, texto string) (wamid string, err error)
+}
+
 type Service struct {
 	repo  *Repo
+	saida Saida
 	log   *slog.Logger
 	agora func() time.Time
 }
 
-func NovoService(repo *Repo, log *slog.Logger) *Service {
-	return &Service{repo: repo, log: log, agora: func() time.Time { return time.Now().UTC() }}
+func NovoService(repo *Repo, saida Saida, log *slog.Logger) *Service {
+	return &Service{repo: repo, saida: saida, log: log, agora: func() time.Time { return time.Now().UTC() }}
 }
 
 // horaDaMeta converte o timestamp em segundos que a Meta manda como string.
@@ -336,3 +352,95 @@ func (s *Service) confirmarEscopo(ctx context.Context, u acesso.Usuario, id uuid
 	}
 	return ErrForaDoEscopo
 }
+
+var (
+	// ErrJanelaFechada é o caso comum e esperado, não uma falha: passadas as
+	// 24 horas desde a última mensagem do cliente, a Meta recusa texto livre.
+	// Daí em diante só um template aprovado alcança essa pessoa — o que é
+	// disparo da régua, não resposta de mesa.
+	ErrJanelaFechada = errors.New("janela de atendimento fechada")
+
+	// ErrSemSaida é a mesa sem canal configurado: lê, não responde.
+	ErrSemSaida = errors.New("nenhum canal de envio configurado")
+
+	// ErrTextoVazio e ErrTextoLongo são validação de entrada. Ficam também no
+	// serviço, e não só no DTO do handler, porque a regra vale para qualquer
+	// chamador — validação no handler é a primeira barreira, não a única.
+	ErrTextoVazio = errors.New("resposta sem texto")
+	ErrTextoLongo = errors.New("resposta acima do limite da Meta")
+)
+
+// LimiteTextoResposta é o teto da Meta para o corpo de uma mensagem de texto.
+// Cortar aqui evita gastar a chamada para ela recusar por tamanho.
+const LimiteTextoResposta = 4096
+
+// Responder entrega a mensagem do analista ao cliente e a guarda na conversa.
+//
+// A ordem importa: envia primeiro, registra depois. Registrar antes deixaria
+// na tela uma resposta que o cliente nunca recebeu — numa cobrança, isso é
+// pior do que não ter registro, porque o analista pararia de insistir
+// acreditando ter falado.
+func (s *Service) Responder(ctx context.Context, u acesso.Usuario, id uuid.UUID, texto string) (MensagemResposta, error) {
+	texto = strings.TrimSpace(texto)
+	if texto == "" {
+		return MensagemResposta{}, ErrTextoVazio
+	}
+	if len([]rune(texto)) > LimiteTextoResposta {
+		return MensagemResposta{}, ErrTextoLongo
+	}
+
+	// Escopo antes de tudo: quem não vê a conversa também não escreve nela.
+	if err := s.confirmarEscopo(ctx, u, id); err != nil {
+		return MensagemResposta{}, err
+	}
+
+	c, err := s.repo.PorID(ctx, id)
+	if err != nil {
+		return MensagemResposta{}, err
+	}
+
+	agora := s.agora()
+	if !c.JanelaAberta(agora) {
+		return MensagemResposta{}, ErrJanelaFechada
+	}
+	if s.saida == nil {
+		return MensagemResposta{}, ErrSemSaida
+	}
+
+	wamid, err := s.saida.EnviarTextoLivre(ctx, c.Telefone, texto)
+	if err != nil {
+		return MensagemResposta{}, err
+	}
+
+	m := Mensagem{
+		ID:         uuid.New(),
+		ConversaID: c.ID,
+		Direcao:    DirecaoSaida,
+		Tipo:       "text",
+		Texto:      &texto,
+		Status:     ptr(StatusEnviada),
+		OcorridaEm: agora,
+		CriadoEm:   agora,
+	}
+	if wamid != "" {
+		m.Wamid = &wamid
+	}
+
+	if err := s.repo.RegistrarSaida(ctx, &m); err != nil {
+		// A mensagem já saiu; perder o registro não a traz de volta. Devolver
+		// erro aqui faria o analista mandar de novo e o cliente receber duas
+		// vezes, então o certo é avisar alto e considerar entregue.
+		s.log.ErrorContext(ctx, "resposta entregue mas não registrada na conversa",
+			"conversa", c, "erro", err)
+	}
+
+	s.log.InfoContext(ctx, "resposta da mesa entregue",
+		"conversa", c, "usuario", u.ID, "tamanho_texto", len(texto))
+
+	return MensagemResposta{
+		ID: m.ID, Direcao: m.Direcao, Tipo: m.Tipo,
+		Texto: m.Texto, Status: m.Status, OcorridaEm: m.OcorridaEm,
+	}, nil
+}
+
+func ptr[T any](v T) *T { return &v }
