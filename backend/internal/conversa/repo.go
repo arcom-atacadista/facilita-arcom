@@ -103,11 +103,34 @@ func (r *Repo) RegistrarEntrada(ctx context.Context, m *Mensagem, janelaExpiraEm
 
 // RegistrarSaida guarda a mensagem que a plataforma mandou, para a conversa
 // aparecer completa na mesa.
+//
+// Também avança ultima_mensagem_em, que é como a fila se ordena. Sem isso a
+// coluna só andava com fala do cliente (RegistrarEntrada): uma conversa que
+// acabou de receber resposta da mesa, ou a cobrança da régua, ficava parada no
+// horário antigo e a tela mostrava "última mensagem" errada.
+//
+// greatest e não atribuição direta: aviso de entrega da Meta chega fora de
+// ordem, e uma mensagem antiga registrada depois não pode puxar a conversa
+// para trás no tempo.
 func (r *Repo) RegistrarSaida(ctx context.Context, m *Mensagem) error {
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "wamid"}},
-		DoNothing: true,
-	}).Create(m).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "wamid"}},
+			DoNothing: true,
+		}).Create(m)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil // reentrega: já tínhamos esta mensagem
+		}
+
+		return tx.Model(&Conversa{}).Where("id = ?", m.ConversaID).Updates(map[string]any{
+			"ultima_mensagem_em": gorm.Expr(
+				"greatest(coalesce(conversas.ultima_mensagem_em, ?), ?)", m.OcorridaEm, m.OcorridaEm),
+			"atualizado_em": time.Now().UTC(),
+		}).Error
+	})
 }
 
 // AtualizarStatusDaSaida aplica o aviso de entrega da Meta.
@@ -220,6 +243,57 @@ func (r *Repo) ListarConversas(ctx context.Context, u acesso.Usuario, pagina, po
 		Limit(porPagina).Offset((pagina - 1) * porPagina).
 		Find(&conversas).Error
 	return conversas, total, err
+}
+
+// ResumoDaFila é o que a mesa precisa por conversa além do que a tabela
+// conversas guarda: o nome do cliente na carteira e a última fala.
+//
+// Vem numa consulta só, por conversa em lote, e não por linha na tela — a fila
+// tem 20 itens por página e uma consulta por item seriam 40 idas ao banco a
+// cada refresh.
+type ResumoDaFila struct {
+	ConversaID    uuid.UUID `gorm:"column:conversa_id"`
+	NomeCliente   *string   `gorm:"column:nome_cliente"`
+	Documento     *string   `gorm:"column:documento"`
+	UltimoTexto   *string   `gorm:"column:ultimo_texto"`
+	UltimaDirecao *string   `gorm:"column:ultima_direcao"`
+}
+
+// ResumoDaFilaPor devolve o resumo das conversas pedidas, indexado por id.
+// Lista vazia devolve mapa vazio sem tocar no banco — `IN ()` é erro de sintaxe
+// no Postgres.
+func (r *Repo) ResumoDaFilaPor(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]ResumoDaFila, error) {
+	porID := make(map[uuid.UUID]ResumoDaFila, len(ids))
+	if len(ids) == 0 {
+		return porID, nil
+	}
+
+	var linhas []ResumoDaFila
+	// DISTINCT ON pega a mensagem mais recente de cada conversa numa varredura
+	// só; o LEFT JOIN mantém a conversa de número que ainda não casou com
+	// nenhum cliente da carteira.
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT c.id           AS conversa_id,
+		       cl.nome        AS nome_cliente,
+		       cl.documento   AS documento,
+		       m.texto        AS ultimo_texto,
+		       m.direcao      AS ultima_direcao
+		  FROM conversas c
+		  LEFT JOIN clientes cl ON cl.id = c.cliente_id
+		  LEFT JOIN (
+		        SELECT DISTINCT ON (conversa_id) conversa_id, texto, direcao
+		          FROM mensagens
+		         ORDER BY conversa_id, ocorrida_em DESC
+		  ) m ON m.conversa_id = c.id
+		 WHERE c.id IN ?`, ids).Scan(&linhas).Error
+	if err != nil {
+		return nil, err
+	}
+
+	for _, l := range linhas {
+		porID[l.ConversaID] = l
+	}
+	return porID, nil
 }
 
 func (r *Repo) MensagensDaConversa(ctx context.Context, conversaID uuid.UUID, limite int) ([]Mensagem, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"facilitaarcom/internal/acesso"
+	"facilitaarcom/internal/cobranca"
 )
 
 // Saida entrega a resposta do analista ao cliente.
@@ -268,6 +269,20 @@ type ConversaResposta struct {
 	JanelaExpiraEm   *time.Time `json:"janelaExpiraEm"`
 	UltimaMensagemEm *time.Time `json:"ultimaMensagemEm"`
 	NaoLidas         int        `json:"naoLidas"`
+
+	// Nome é como o cliente é tratado na mesa: razão social sem o sufixo
+	// jurídico para PJ, primeiro nome para PF (ver cobranca.NomeDeTratamento).
+	// Sem cliente na carteira sobra o nome do perfil do WhatsApp, e sem ele o
+	// telefone mascarado — a conversa nunca aparece sem identificação.
+	Nome string `json:"nome"`
+
+	// Previa é a última fala da conversa, o que permite triar a fila sem abrir
+	// cada uma. Vazia quando a última mensagem não é texto (áudio, imagem).
+	Previa *string `json:"previa"`
+
+	// PreviaDoCliente diz de que lado veio a prévia, para a tela marcar o que
+	// está esperando resposta.
+	PreviaDoCliente bool `json:"previaDoCliente"`
 }
 
 type MensagemResposta struct {
@@ -292,17 +307,56 @@ func (s *Service) Listar(ctx context.Context, u acesso.Usuario, pagina, porPagin
 		return nil, 0, err
 	}
 
+	ids := make([]uuid.UUID, 0, len(conversas))
+	for _, c := range conversas {
+		ids = append(ids, c.ID)
+	}
+	resumos, err := s.repo.ResumoDaFilaPor(ctx, ids)
+	if err != nil {
+		// A fila continua utilizável sem nome e prévia: some o que ajuda a
+		// triar, não o acesso à conversa. Melhor lista pobre que tela vazia.
+		s.log.WarnContext(ctx, "não consegui carregar nome e prévia da fila", "erro", err)
+		resumos = map[uuid.UUID]ResumoDaFila{}
+	}
+
 	agora := s.agora()
 	itens := make([]ConversaResposta, 0, len(conversas))
 	for _, c := range conversas {
-		itens = append(itens, ConversaResposta{
-			ID: c.ID, Telefone: MascararTelefone(c.Telefone), NomePerfil: c.NomePerfil,
+		mascarado := MascararTelefone(c.Telefone)
+		r := resumos[c.ID]
+
+		item := ConversaResposta{
+			ID: c.ID, Telefone: mascarado, NomePerfil: c.NomePerfil,
 			ClienteID: c.ClienteID, JanelaAberta: c.JanelaAberta(agora),
 			JanelaExpiraEm: c.JanelaExpiraEm, UltimaMensagemEm: c.UltimaMensagemEm,
 			NaoLidas: c.NaoLidas,
-		})
+			Nome:     nomeDaMesa(r, c.NomePerfil, mascarado),
+			Previa:   r.UltimoTexto,
+		}
+		if r.UltimaDirecao != nil {
+			item.PreviaDoCliente = *r.UltimaDirecao == DirecaoEntrada
+		}
+		itens = append(itens, item)
 	}
 	return itens, total, nil
+}
+
+// nomeDaMesa escolhe como chamar o cliente, na ordem de confiança: o cadastro
+// da carteira, o nome que a pessoa pôs no perfil do WhatsApp, e por último o
+// telefone mascarado. Nunca devolve vazio — conversa sem identificação na tela
+// é conversa que o analista não consegue atender.
+func nomeDaMesa(r ResumoDaFila, nomePerfil *string, telefoneMascarado string) string {
+	if r.NomeCliente != nil && *r.NomeCliente != "" {
+		doc := ""
+		if r.Documento != nil {
+			doc = *r.Documento
+		}
+		return cobranca.NomeDeTratamento(*r.NomeCliente, doc)
+	}
+	if nomePerfil != nil && *nomePerfil != "" {
+		return *nomePerfil
+	}
+	return telefoneMascarado
 }
 
 var ErrForaDoEscopo = errors.New("conversa fora da carteira do usuário")

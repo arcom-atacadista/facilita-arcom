@@ -319,3 +319,94 @@ func TestMesaResponde404ParaConversaInexistente(t *testing.T) {
 		t.Fatalf("status = %d, quer 404 (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+func TestRespostaDaMesaAvancaAUltimaMensagemDaFila(t *testing.T) {
+	// Sem isto a fila se ordenava só por fala do cliente: a conversa que a
+	// equipe acabou de responder ficava parada no horário antigo, e a tela
+	// mostrava "última mensagem" desatualizada.
+	meta := novaMetaFalsa(t)
+	h, _ := servidorComMesa(t, meta)
+	criarGerencia(t, h)
+
+	id := conversaAberta(t, h, "5531988881111", "wamid.CLIENTE7")
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	antes := ultimaMensagemDaFila(t, h, cookie, id)
+
+	rec := chamar(t, h, http.MethodPost, "/api/v1/conversas/"+id+"/mensagens",
+		map[string]string{"texto": "consigo confirmar hoje"}, cookie)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("responder: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	depois := ultimaMensagemDaFila(t, h, cookie, id)
+	if !depois.After(antes) {
+		t.Errorf("ultimaMensagemEm não avançou: antes %s, depois %s", antes, depois)
+	}
+}
+
+func ultimaMensagemDaFila(t *testing.T, h http.Handler, cookie *http.Cookie, id string) time.Time {
+	t.Helper()
+	rec := chamar(t, h, http.MethodGet, "/api/v1/conversas", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listar conversas: status %d (%s)", rec.Code, rec.Body.String())
+	}
+	var resposta struct {
+		Itens []struct {
+			ID               string     `json:"id"`
+			UltimaMensagemEm *time.Time `json:"ultimaMensagemEm"`
+		} `json:"itens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resposta); err != nil {
+		t.Fatalf("ler listagem: %v", err)
+	}
+	for _, item := range resposta.Itens {
+		if item.ID == id && item.UltimaMensagemEm != nil {
+			return *item.UltimaMensagemEm
+		}
+	}
+	t.Fatalf("conversa %s sem ultimaMensagemEm na fila", id)
+	return time.Time{}
+}
+
+func TestFilaTrazNomeDaCarteiraEPrevia(t *testing.T) {
+	// A prévia e o nome são o que permite triar a fila sem abrir cada conversa.
+	meta := novaMetaFalsa(t)
+	h, _ := servidorComMesa(t, meta)
+	criarGerencia(t, h)
+
+	conversaAberta(t, h, "5531988880000", "wamid.CLIENTE8")
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	rec := chamar(t, h, http.MethodGet, "/api/v1/conversas", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	var resposta struct {
+		Itens []struct {
+			Nome            string  `json:"nome"`
+			Previa          *string `json:"previa"`
+			PreviaDoCliente bool    `json:"previaDoCliente"`
+		} `json:"itens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resposta); err != nil {
+		t.Fatalf("ler listagem: %v", err)
+	}
+	if len(resposta.Itens) != 1 {
+		t.Fatalf("conversas = %d, quer 1", len(resposta.Itens))
+	}
+	item := resposta.Itens[0]
+
+	// Sem cliente na carteira, o nome do perfil do WhatsApp é o que sobra — e
+	// nunca vazio, senão o analista não sabe com quem está falando.
+	if item.Nome == "" {
+		t.Error("nome vazio na fila")
+	}
+	if item.Previa == nil || *item.Previa != "quero negociar minha dívida" {
+		t.Errorf("previa = %v, quer a última fala do cliente", item.Previa)
+	}
+	if !item.PreviaDoCliente {
+		t.Error("previaDoCliente = false, mas a última mensagem é do cliente")
+	}
+}

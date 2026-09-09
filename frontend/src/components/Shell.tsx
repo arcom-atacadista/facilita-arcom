@@ -29,6 +29,7 @@ const NAVEGACAO: ItemNav[] = [
   { para: "/carteira", rotulo: "Carteira" },
   { para: "/acordos", rotulo: "Acordos" },
   { para: "/disparos", rotulo: "Régua de cobrança" },
+  { para: "/mesa", rotulo: "Mesa de atendimento" },
   { para: "/politicas", rotulo: "Políticas", minimo: "coordenacao" },
   { para: "/usuarios", rotulo: "Usuários", minimo: "coordenacao" },
 ];

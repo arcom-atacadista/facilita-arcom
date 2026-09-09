@@ -15,6 +15,7 @@ const Carteira = lazy(() => import("./pages/Carteira"));
 const Divida = lazy(() => import("./pages/Divida"));
 const Acordos = lazy(() => import("./pages/Acordos"));
 const Disparos = lazy(() => import("./pages/Disparos"));
+const Mesa = lazy(() => import("./pages/Mesa"));
 const Politicas = lazy(() => import("./pages/Politicas"));
 const Usuarios = lazy(() => import("./pages/Usuarios"));
 
@@ -47,6 +48,7 @@ export function Rotas() {
               <Route path="/carteira/:id" element={<Divida />} />
               <Route path="/acordos" element={<Acordos />} />
               <Route path="/disparos" element={<Disparos />} />
+              <Route path="/mesa" element={<Mesa />} />
               <Route path="/politicas" element={<Politicas />} />
               <Route path="/usuarios" element={<Usuarios />} />
             </Route>
