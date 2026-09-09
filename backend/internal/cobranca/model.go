@@ -298,8 +298,11 @@ type EntradaAtualizarPolitica struct {
 // EntradaFecharAcordo é o acordo lançado por um operador na mesa (o cliente
 // que fecha sozinho passa pelo pacote negociacao, que não aceita desconto
 // arbitrário — usa só o da política).
+// EntradaFecharAcordo aponta para o CLIENTE, não para um título: o acordo
+// engloba todos os títulos em atraso do CNPJ, e receber um dividaId aqui daria
+// a impressão de que dá para negociar um documento isolado.
 type EntradaFecharAcordo struct {
-	DividaID      uuid.UUID `json:"dividaId" validate:"required"`
+	ClienteID     uuid.UUID `json:"clienteId" validate:"required"`
 	TipoPagamento string    `json:"tipoPagamento" validate:"required,oneof=pix boleto"`
 	DescontoPct   float64   `json:"descontoPct" validate:"gte=0,lte=100"`
 	Parcelas      int       `json:"parcelas" validate:"required,gte=1,lte=24"`

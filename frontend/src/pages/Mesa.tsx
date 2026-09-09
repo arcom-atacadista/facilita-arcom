@@ -27,7 +27,22 @@ import { cn } from "../core/cn";
 import { ROTULO_FAIXA, dataHora, moeda, porcentagem } from "../core/formato";
 import { notificar } from "../core/toast";
 import type { ErroApi } from "../core/erro";
-import type { Lista } from "../tipos/api";
+import type {
+  Acordo,
+  Lista,
+  Oferta,
+  Ofertas,
+  Posicao,
+} from "../tipos/api";
+
+type RespostaOfertas = {
+  posicao: Posicao;
+  ofertas: Ofertas;
+  /** O acordo em vigor, quando existe. Depois de fechado, a posição aberta
+   *  fica vazia e é ele que a coluna mostra. */
+  acordoAtivo: Acordo | null;
+  alcadaMaxima: number;
+};
 
 type Conversa = {
   id: string;
@@ -41,38 +56,6 @@ type Conversa = {
   naoLidas: number;
   previa: string | null;
   previaDoCliente: boolean;
-};
-
-type Oferta = {
-  descontoPct: number;
-  desconto: number;
-  valorTotal: number;
-  economia: number;
-  maxParcelas: number;
-  entrada: number;
-  exigeAprovacao: boolean;
-};
-
-type Ofertas = {
-  avista: Oferta;
-  parcelado: Oferta | null;
-  /** A condição que a política concede e a alçada de quem olha não cobre. */
-  ampliada: Oferta | null;
-};
-
-type Posicao = {
-  saldo: number;
-  encargos: number;
-  principal: number;
-  titulos: number;
-  diasAtrasoMaximo: number;
-  faixa: string;
-};
-
-type RespostaOfertas = {
-  posicao: Posicao;
-  ofertas: Ofertas;
-  alcadaMaxima: number;
 };
 
 type Mensagem = {
@@ -588,7 +571,7 @@ function ColunaCliente({ conversa }: { conversa: Conversa }) {
             </p>
           </div>
         ) : (
-          <PainelDeOfertas dados={consulta.data} />
+          <PainelDeOfertas dados={consulta.data} clienteId={clienteId} />
         )}
 
         <div>
@@ -606,8 +589,58 @@ function ColunaCliente({ conversa }: { conversa: Conversa }) {
   );
 }
 
-function PainelDeOfertas({ dados }: { dados: RespostaOfertas }) {
-  const { posicao, ofertas, alcadaMaxima } = dados;
+function PainelDeOfertas({
+  dados,
+  clienteId,
+}: {
+  dados: RespostaOfertas;
+  clienteId: string;
+}) {
+  const { posicao, ofertas, alcadaMaxima, acordoAtivo } = dados;
+  const queryClient = useQueryClient();
+
+  const fechar = useMutation({
+    mutationFn: async (escolha: { oferta: Oferta; parcelas: number }) =>
+      (
+        await api.post<Acordo>(
+          "/acordos",
+          {
+            clienteId,
+            tipoPagamento: escolha.parcelas > 1 ? "boleto" : "pix",
+            descontoPct: escolha.oferta.descontoPct,
+            parcelas: escolha.parcelas,
+          },
+          { skipErroGlobal: true },
+        )
+      ).data,
+    onSuccess: (acordo) => {
+      notificar.sucesso(
+        `Acordo fechado: ${moeda(acordo.valorTotal)} cobrindo ${acordo.titulos} ${
+          acordo.titulos === 1 ? "título" : "títulos"
+        }.`,
+      );
+      void queryClient.invalidateQueries({ queryKey: chaves.ofertas(clienteId) });
+      void queryClient.invalidateQueries({ queryKey: ["carteira"] });
+      void queryClient.invalidateQueries({ queryKey: ["acordos"] });
+    },
+    onError: (erro: ErroApi) => {
+      // A alçada tem mensagem própria: o servidor é quem decide, e a tela
+      // precisa dizer o que fazer em vez de só reclamar.
+      if (erro.codigo === "acima_da_alcada") {
+        notificar.erro(
+          "Este desconto passa da sua alçada. Peça aprovação à coordenação antes de oferecer.",
+        );
+        return;
+      }
+      notificar.erro(erro.mensagem);
+    },
+  });
+
+  // Acordo em vigor: não há condição nova a oferecer, e mostrar cartão de
+  // oferta aqui convidaria o analista a negociar duas vezes o mesmo saldo.
+  if (acordoAtivo) {
+    return <AcordoEmVigor acordo={acordoAtivo} />;
+  }
 
   return (
     <>
@@ -659,6 +692,8 @@ function PainelDeOfertas({ dados }: { dados: RespostaOfertas }) {
         oferta={ofertas.avista}
         posicao={posicao}
         selo="Sua alçada"
+        aoFechar={(parcelas) => fechar.mutate({ oferta: ofertas.avista, parcelas })}
+        fechando={fechar.isPending}
       />
 
       {ofertas.parcelado ? (
@@ -668,6 +703,10 @@ function PainelDeOfertas({ dados }: { dados: RespostaOfertas }) {
           posicao={posicao}
           selo="Sua alçada"
           nota={`O parcelamento cobre os ${posicao.titulos} títulos em atraso do CNPJ — não é possível parcelar um título isolado.`}
+          aoFechar={(parcelas) =>
+            fechar.mutate({ oferta: ofertas.parcelado as Oferta, parcelas })
+          }
+          fechando={fechar.isPending}
         />
       ) : null}
 
@@ -684,20 +723,86 @@ function PainelDeOfertas({ dados }: { dados: RespostaOfertas }) {
   );
 }
 
+function AcordoEmVigor({ acordo }: { acordo: Acordo }) {
+  return (
+    <div className="rounded-md border border-verde-arcom/25 bg-verde-arcom/10 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <b className="text-sm font-bold text-verde-arcom">Acordo em vigor</b>
+        <Etiqueta tom="sucesso">
+          {acordo.origem === "cliente" ? "Fechado pelo cliente" : "Fechado pela equipe"}
+        </Etiqueta>
+      </div>
+
+      <dl className="mt-2 space-y-1 text-xs">
+        <div className="flex justify-between gap-2">
+          <dt className="text-arcom-gray">Valor</dt>
+          <dd className="font-bold text-verde-escuro tabular-nums">
+            {moeda(acordo.valorTotal)}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-arcom-gray">Desconto concedido</dt>
+          <dd className="font-bold text-verde-escuro tabular-nums">
+            {porcentagem(acordo.descontoPct)}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-arcom-gray">Parcelas</dt>
+          <dd className="font-bold text-verde-escuro tabular-nums">
+            {acordo.parcelas}x
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-arcom-gray">Títulos cobertos</dt>
+          <dd className="font-bold text-verde-escuro tabular-nums">
+            {acordo.titulos}
+          </dd>
+        </div>
+      </dl>
+
+      <p className="mt-2 text-xs leading-relaxed text-arcom-gray">
+        Não há condição nova a oferecer enquanto este acordo estiver ativo. Para
+        renegociar, o acordo atual precisa ser rompido ou cancelado pela
+        coordenação.
+      </p>
+
+      <Link
+        to="/acordos"
+        className="mt-2 inline-block text-xs font-bold text-verde-arcom underline"
+      >
+        Ver nos acordos
+      </Link>
+    </div>
+  );
+}
+
 function CartaoDeOferta({
   titulo,
   oferta,
   posicao,
   selo,
   nota,
+  aoFechar,
+  fechando,
 }: {
   titulo: string;
   oferta: Oferta;
   posicao: Posicao;
   selo: string;
   nota?: string;
+  /** Ausente na condição travada: sem aprovação não há o que fechar. */
+  aoFechar?: (parcelas: number) => void;
+  fechando?: boolean;
 }) {
   const travada = oferta.exigeAprovacao;
+  const [parcelas, setParcelas] = useState(oferta.maxParcelas > 1 ? 2 : 1);
+  const [confirmando, setConfirmando] = useState(false);
+
+  // A trava da tela contra a volta da conta antiga. Redundante com o servidor
+  // de propósito: o custo de o desconto voltar a incidir sobre mercadoria é
+  // alto o bastante para as duas pontas recusarem.
+  const descontoIncoerente = oferta.desconto > posicao.encargos;
+  const podeFechar = aoFechar && !travada && !descontoIncoerente;
 
   return (
     <div
@@ -726,14 +831,6 @@ function CartaoDeOferta({
             {moeda(oferta.valorTotal)}
           </dd>
         </div>
-        {oferta.maxParcelas > 1 ? (
-          <div className="flex justify-between gap-2">
-            <dt className="text-arcom-gray">Parcelas</dt>
-            <dd className="font-bold text-verde-escuro tabular-nums">
-              até {oferta.maxParcelas}x
-            </dd>
-          </div>
-        ) : null}
         {oferta.entrada > 0 ? (
           <div className="flex justify-between gap-2">
             <dt className="text-arcom-gray">Entrada mínima</dt>
@@ -755,13 +852,71 @@ function CartaoDeOferta({
         </p>
       ) : null}
 
-      {/* O desconto nunca pode passar dos encargos. Se passar, a conta voltou
-          a incidir sobre mercadoria — e é melhor a tela gritar do que o
-          analista oferecer. */}
-      {oferta.desconto > posicao.encargos ? (
+      {descontoIncoerente ? (
         <p className="mt-2 text-xs font-bold text-danger">
           Desconto acima dos encargos. Não ofereça: avise a coordenação.
         </p>
+      ) : null}
+
+      {podeFechar ? (
+        <div className="mt-3 border-t border-surface-border pt-3">
+          {oferta.maxParcelas > 1 ? (
+            <label className="mb-2 flex items-center justify-between gap-2 text-xs">
+              <span className="text-arcom-gray">Parcelas</span>
+              <select
+                value={parcelas}
+                onChange={(e) => {
+                  setParcelas(Number(e.target.value));
+                  setConfirmando(false);
+                }}
+                className="rounded-md border border-surface-border bg-white px-2 py-1 text-xs font-bold text-verde-escuro"
+              >
+                {Array.from({ length: oferta.maxParcelas - 1 }, (_, i) => i + 2).map(
+                  (n) => (
+                    <option key={n} value={n}>
+                      {n}x de {moeda(oferta.valorTotal / n)}
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+          ) : null}
+
+          {confirmando ? (
+            <>
+              {/* Confirmação em dois passos: fechar acordo muda o status de
+                  todos os títulos do CNPJ e tira o cliente da régua. Um clique
+                  errado aqui não desfaz sozinho. */}
+              <p className="mb-2 text-xs leading-relaxed text-verde-escuro">
+                Confirma <strong>{moeda(oferta.valorTotal)}</strong> em{" "}
+                <strong>{parcelas}x</strong>, cobrindo os {posicao.titulos}{" "}
+                {posicao.titulos === 1 ? "título" : "títulos"} em atraso? O cliente
+                sai da régua de cobrança.
+              </p>
+              <div className="flex gap-2">
+                <Botao
+                  className="flex-1"
+                  onClick={() => aoFechar(parcelas)}
+                  disabled={fechando}
+                  carregando={fechando}
+                >
+                  Confirmar acordo
+                </Botao>
+                <Botao
+                  variante="secundario"
+                  onClick={() => setConfirmando(false)}
+                  disabled={fechando}
+                >
+                  Cancelar
+                </Botao>
+              </div>
+            </>
+          ) : (
+            <Botao className="w-full" onClick={() => setConfirmando(true)}>
+              Fechar acordo
+            </Botao>
+          )}
+        </div>
       ) : null}
     </div>
   );

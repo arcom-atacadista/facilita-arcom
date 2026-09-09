@@ -174,7 +174,7 @@ func TestAlcadaEhAplicadaNoServidor(t *testing.T) {
 
 	// Aprendiz tem alçada de 20%.
 	rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
-		"dividaId": divida, "tipoPagamento": "pix", "descontoPct": 50, "parcelas": 1,
+		"clienteId": clienteDaDivida(t, gdb, divida), "tipoPagamento": "pix", "descontoPct": 50, "parcelas": 1,
 	}, cookieAprendiz)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("desconto de 50%% com alçada de 20%%: status = %d, quer 403 (%s)", rec.Code, rec.Body.String())
@@ -205,7 +205,7 @@ func TestAlcadaEhAplicadaNoServidor(t *testing.T) {
 
 	// Dentro da alçada, passa.
 	rec = chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
-		"dividaId": divida, "tipoPagamento": "pix", "descontoPct": 20, "parcelas": 1,
+		"clienteId": clienteDaDivida(t, gdb, divida), "tipoPagamento": "pix", "descontoPct": 20, "parcelas": 1,
 	}, cookieAprendiz)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("desconto de 20%% com alçada de 20%%: status = %d, quer 201 (%s)", rec.Code, rec.Body.String())
@@ -221,7 +221,7 @@ func TestSomaDasParcelasBateComOTotalDoAcordo(t *testing.T) {
 	divida := semearDivida(t, gdb, "11111111111", "CT-1", "", 1250.90, 40)
 
 	rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
-		"dividaId": divida, "tipoPagamento": "boleto", "descontoPct": 10, "parcelas": 6,
+		"clienteId": clienteDaDivida(t, gdb, divida), "tipoPagamento": "boleto", "descontoPct": 10, "parcelas": 6,
 	}, cookieGerencia)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, quer 201 (%s)", rec.Code, rec.Body.String())
@@ -251,7 +251,7 @@ func TestSegundoAcordoNoMesmoClienteEhRecusado(t *testing.T) {
 	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
 
 	divida := semearDivida(t, gdb, "11111111111", "CT-1", "", 1000, 40)
-	corpo := map[string]any{"dividaId": divida, "tipoPagamento": "pix", "descontoPct": 5, "parcelas": 1}
+	corpo := map[string]any{"clienteId": clienteDaDivida(t, gdb, divida), "tipoPagamento": "pix", "descontoPct": 5, "parcelas": 1}
 
 	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", corpo, cookieGerencia); rec.Code != http.StatusCreated {
 		t.Fatalf("primeiro acordo: status %d (%s)", rec.Code, rec.Body.String())
@@ -444,7 +444,7 @@ func TestAcordoCobreTodosOsTitulosDoCNPJ(t *testing.T) {
 	semearDividaDoCliente(t, gdb, cliente, "CT-3", 300, 30, 45)
 
 	rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
-		"dividaId": primeira, "tipoPagamento": "pix", "descontoPct": 10, "parcelas": 1,
+		"clienteId": cliente, "tipoPagamento": "pix", "descontoPct": 10, "parcelas": 1,
 	}, cookie)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("fechar acordo: status %d (%s)", rec.Code, rec.Body.String())
@@ -463,5 +463,92 @@ func TestAcordoCobreTodosOsTitulosDoCNPJ(t *testing.T) {
 	}
 	if abertos != 0 {
 		t.Errorf("%d título(s) ficaram abertos depois do acordo — voltariam para a régua", abertos)
+	}
+}
+
+func TestOfertasMostramOAcordoEmVigorEmVezDeVazio(t *testing.T) {
+	// Depois de fechar, todos os títulos viram "negociado" e a posição aberta
+	// fica vazia. Sem devolver o acordo, a mesa diria "sem título em atraso"
+	// logo depois de o analista fechar um — o que pareceria acordo não gravado.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	primeira := semearDivida(t, gdb, "11222333000181", "CT-1", "", 1000, 40)
+	cliente := clienteDaDivida(t, gdb, primeira)
+	semearDividaDoCliente(t, gdb, cliente, "CT-2", 500, 50, 45)
+
+	// Antes: posição aberta, sem acordo.
+	rec := chamar(t, h, http.MethodGet, "/api/v1/carteira/clientes/"+cliente.String()+"/ofertas", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("antes: status %d (%s)", rec.Code, rec.Body.String())
+	}
+	var antes struct {
+		Posicao struct{ Titulos int } `json:"posicao"`
+		Acordo  *struct{}             `json:"acordoAtivo"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &antes); err != nil {
+		t.Fatalf("ler antes: %v", err)
+	}
+	if antes.Posicao.Titulos != 2 || antes.Acordo != nil {
+		t.Fatalf("antes do acordo: títulos %d, acordo %v", antes.Posicao.Titulos, antes.Acordo)
+	}
+
+	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
+		"clienteId": cliente, "tipoPagamento": "pix", "descontoPct": 10, "parcelas": 1,
+	}, cookie); rec.Code != http.StatusCreated {
+		t.Fatalf("fechar acordo: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Depois: 200 com o acordo, e não 404 de "sem posição".
+	rec = chamar(t, h, http.MethodGet, "/api/v1/carteira/clientes/"+cliente.String()+"/ofertas", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("depois: status %d, quer 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var depois struct {
+		Acordo *struct {
+			Titulos    int     `json:"titulos"`
+			ValorTotal float64 `json:"valorTotal"`
+			Status     string  `json:"status"`
+		} `json:"acordoAtivo"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &depois); err != nil {
+		t.Fatalf("ler depois: %v", err)
+	}
+	if depois.Acordo == nil {
+		t.Fatal("depois de fechar, a resposta tem que trazer o acordo em vigor")
+	}
+	if depois.Acordo.Titulos != 2 {
+		t.Errorf("títulos cobertos = %d, quer 2", depois.Acordo.Titulos)
+	}
+	if depois.Acordo.Status != "ativo" {
+		t.Errorf("status = %q, quer ativo", depois.Acordo.Status)
+	}
+}
+
+func TestFecharAcordoDeClienteForaDaCarteiraRespondem404(t *testing.T) {
+	// A escrita tem o mesmo recorte da leitura: trocar o clienteId no corpo não
+	// fecha acordo na carteira de outro analista.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+
+	doBruno := semearDivida(t, gdb, "33333333333", "CT-BRUNO", "BRUNO", 900, 70)
+	cliente := clienteDaDivida(t, gdb, doBruno)
+
+	cookieAna := criarOperador(t, h, cookieGerencia, "ana3@arcom.com.br", "analista", "ANA")
+	rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
+		"clienteId": cliente, "tipoPagamento": "pix", "descontoPct": 5, "parcelas": 1,
+	}, cookieAna)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, quer 404 (%s)", rec.Code, rec.Body.String())
+	}
+
+	var quantos int64
+	if err := gdb.Raw(`SELECT count(*) FROM acordos`).Scan(&quantos).Error; err != nil {
+		t.Fatalf("contar: %v", err)
+	}
+	if quantos != 0 {
+		t.Errorf("gravou %d acordo(s) fora do escopo", quantos)
 	}
 }

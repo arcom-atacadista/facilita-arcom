@@ -108,21 +108,42 @@ func normalizarPaginacao(pagina, porPagina int) (int, int) {
 // cliente com seis títulos vencidos fecha um acordo, não seis. O recorte de
 // carteira é aplicado na consulta, então posição de cliente fora do escopo
 // volta vazia — e o handler traduz isso em 404, nunca 403.
-func (s *Service) OfertasDoCliente(ctx context.Context, u acesso.Usuario, clienteID uuid.UUID) (Posicao, Ofertas, error) {
+func (s *Service) OfertasDoCliente(ctx context.Context, u acesso.Usuario, clienteID uuid.UUID) (Posicao, Ofertas, *AcordoResposta, error) {
 	dividas, err := s.repo.DividasAbertasDoUsuario(ctx, u, clienteID)
 	if err != nil {
-		return Posicao{}, Ofertas{}, err
+		return Posicao{}, Ofertas{}, nil, err
 	}
+
+	// O acordo em vigor vai junto: depois de fechado, todos os títulos viram
+	// "negociado" e a posição aberta fica vazia. Sem devolver o acordo, a tela
+	// diria "sem título em atraso" logo depois de o analista fechar um — o que
+	// pareceria que o acordo não foi gravado.
+	acordo, err := s.repo.AcordoAtivoDoCliente(ctx, clienteID)
+	if err != nil {
+		return Posicao{}, Ofertas{}, nil, err
+	}
+
+	var resposta *AcordoResposta
+	if acordo != nil {
+		r := RespostaDeAcordo(*acordo)
+		resposta = &r
+	}
+
 	if len(dividas) == 0 {
-		return Posicao{}, Ofertas{}, ErrSemPosicaoAberta
+		if resposta != nil {
+			// Posição zerada com acordo em vigor é o estado normal de quem
+			// acabou de negociar, não um erro.
+			return Posicao{}, Ofertas{}, resposta, nil
+		}
+		return Posicao{}, Ofertas{}, nil, ErrSemPosicaoAberta
 	}
 
 	posicao := ConsolidarPosicao(dividas, s.agora())
 	politica, err := s.repo.PoliticaDaFaixa(ctx, posicao.DiasAtrasoMaximo)
 	if err != nil {
-		return Posicao{}, Ofertas{}, err
+		return Posicao{}, Ofertas{}, nil, err
 	}
-	return posicao, CalcularOfertas(posicao, politica, u.AlcadaMaxima), nil
+	return posicao, CalcularOfertas(posicao, politica, u.AlcadaMaxima), resposta, nil
 }
 
 // OfertasDaDivida é a mesma coisa a partir de um título: resolve o cliente
@@ -133,7 +154,7 @@ func (s *Service) OfertasDaDivida(ctx context.Context, u acesso.Usuario, id uuid
 	if err != nil {
 		return Divida{}, Posicao{}, Ofertas{}, err
 	}
-	posicao, ofertas, err := s.OfertasDoCliente(ctx, u, d.ClienteID)
+	posicao, ofertas, _, err := s.OfertasDoCliente(ctx, u, d.ClienteID)
 	if err != nil {
 		return Divida{}, Posicao{}, Ofertas{}, err
 	}
@@ -170,22 +191,24 @@ func (s *Service) FecharAcordoOperador(ctx context.Context, u acesso.Usuario, e 
 		return Acordo{}, &ErroAlcada{Pedido: e.DescontoPct, Teto: u.AlcadaMaxima}
 	}
 
-	d, err := s.repo.DividaDoUsuario(ctx, u, e.DividaID)
-	if err != nil {
-		return Acordo{}, err
-	}
-	if d.Status != StatusDividaAberta {
-		return Acordo{}, ErrDividaNaoNegociavel
-	}
-
-	// O acordo cobre o CNPJ inteiro, mesmo tendo sido aberto a partir de um
-	// título: é a regra do negócio, e é o que evita deixar cinco títulos na
-	// régua cobrando quem já fechou.
-	dividas, err := s.repo.DividasAbertasDoUsuario(ctx, u, d.ClienteID)
+	// O escopo de carteira é aplicado na consulta: cliente que não é da
+	// carteira de quem fecha volta vazio, e vira 404 em vez de 403.
+	dividas, err := s.repo.DividasAbertasDoUsuario(ctx, u, e.ClienteID)
 	if err != nil {
 		return Acordo{}, err
 	}
 	if len(dividas) == 0 {
+		// Distinguir os dois motivos de "não há posição aberta" importa: fechar
+		// o acordo é o que zera a posição, então responder 404 na segunda
+		// tentativa diria ao operador que o cliente não é da carteira dele,
+		// quando na verdade ele acabou de negociar.
+		acordo, erroAcordo := s.repo.AcordoAtivoDoCliente(ctx, e.ClienteID)
+		if erroAcordo != nil {
+			return Acordo{}, erroAcordo
+		}
+		if acordo != nil {
+			return Acordo{}, ErrAcordoJaExiste
+		}
 		return Acordo{}, ErrSemPosicaoAberta
 	}
 
@@ -215,7 +238,7 @@ func (s *Service) FecharAcordoOperador(ctx context.Context, u acesso.Usuario, e 
 	}
 
 	return s.gravar(ctx, dividas, Acordo{
-		ClienteID:     d.ClienteID,
+		ClienteID:     e.ClienteID,
 		TipoPagamento: e.TipoPagamento,
 		DescontoPct:   e.DescontoPct,
 		Entrada:       oferta.Entrada,

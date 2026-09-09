@@ -110,14 +110,15 @@ func (h *Handler) ofertasDoCliente(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	posicao, ofertas, err := h.svc.OfertasDoCliente(r.Context(), u, id)
+	posicao, ofertas, acordo, err := h.svc.OfertasDoCliente(r.Context(), u, id)
 	if err != nil {
 		return traduzir(err)
 	}
 
 	return escreverJSON(w, http.StatusOK, map[string]any{
-		"posicao": posicao,
-		"ofertas": ofertas,
+		"posicao":     posicao,
+		"ofertas":     ofertas,
+		"acordoAtivo": acordo,
 		// A alçada vai na resposta para a tela poder dizer "sua alçada" na
 		// condição que ela cobre, sem precisar adivinhar pelo papel.
 		"alcadaMaxima": u.AlcadaMaxima,

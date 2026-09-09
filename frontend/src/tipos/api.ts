@@ -46,16 +46,33 @@ export type Divida = {
 
 export type Oferta = {
   descontoPct: number;
+  /** Valor abatido em reais. Sai do percentual aplicado SOBRE OS ENCARGOS. */
+  desconto: number;
   valorTotal: number;
   economia: number;
   maxParcelas: number;
   entrada: number;
+  /** Condição que passa da alçada de quem consulta: mostrar, e mostrar travada. */
+  exigeAprovacao: boolean;
 };
 
 export type Ofertas = {
   avista: Oferta;
   /** Nulo quando a política da faixa só permite à vista. */
   parcelado: Oferta | null;
+  /** Nulo quando a alçada de quem consulta já cobre o teto da política. */
+  ampliada: Oferta | null;
+};
+
+/** Posicao é o conjunto de títulos em atraso de um CNPJ — o que um acordo
+ *  cobre. O desconto incide somente sobre `encargos`. */
+export type Posicao = {
+  saldo: number;
+  encargos: number;
+  principal: number;
+  titulos: number;
+  diasAtrasoMaximo: number;
+  faixa: string;
 };
 
 export type Parcela = {
@@ -67,7 +84,9 @@ export type Parcela = {
 
 export type Acordo = {
   id: string;
-  dividaId: string;
+  clienteId: string;
+  /** Quantos títulos do CNPJ este acordo cobre. */
+  titulos: number;
   tipoPagamento: "pix" | "boleto";
   descontoPct: number;
   entrada: number;

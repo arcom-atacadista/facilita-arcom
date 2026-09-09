@@ -32,9 +32,14 @@ import {
 } from "../core/formato";
 import { useSessao } from "../core/sessao";
 import { notificar } from "../core/toast";
-import type { Acordo, Divida as TipoDivida, Ofertas } from "../tipos/api";
+import type {
+  Acordo,
+  Divida as TipoDivida,
+  Ofertas,
+  Posicao,
+} from "../tipos/api";
 
-type RespostaDivida = { divida: TipoDivida; ofertas: Ofertas };
+type RespostaDivida = { divida: TipoDivida; posicao: Posicao; ofertas: Ofertas };
 
 export default function Divida() {
   const { id = "" } = useParams();
@@ -56,7 +61,8 @@ export default function Divida() {
       const { data: acordo } = await api.post<Acordo>(
         "/acordos",
         {
-          dividaId: id,
+          // O acordo é do CNPJ, não deste título: a API recebe o cliente.
+          clienteId: consulta.data?.divida.cliente.id,
           tipoPagamento: pagamento,
           descontoPct: Number(desconto),
           parcelas: Number(parcelas),
