@@ -232,3 +232,44 @@ func TestGerarLinkNovoInvalidaOAnterior(t *testing.T) {
 		t.Errorf("link novo: status = %d, quer 200", rec.Code)
 	}
 }
+
+func TestAceiteComTipoOuParcelasInvalidasDevolve422(t *testing.T) {
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	divida := semearDivida(t, gdb, "11111111111", "CT-1", "", 1000, 40)
+	token := gerarLink(t, h, cookie, divida)
+
+	casos := []map[string]any{
+		{"tipo": "boleto", "parcelas": 1},
+		{"tipo": "avista", "parcelas": 0},
+		{"tipo": "parcelado", "parcelas": 25},
+	}
+	for _, corpo := range casos {
+		rec := chamar(t, h, http.MethodPost, "/api/v1/negociar/"+token+"/aceitar", corpo)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%v: status = %d, quer 422 (%s)", corpo, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// É a única superfície do sistema aberta na internet sem sessão — o rate
+// limit por IP (30/min) é o que impede varredura de token.
+func TestNegociarTemRateLimitPorIP(t *testing.T) {
+	h := servidorComBanco(t)
+
+	bloqueou := false
+	for i := 0; i < 31; i++ {
+		rec := chamar(t, h, http.MethodGet, "/api/v1/negociar/"+strings.Repeat("a", tamanhoTokenTeste), nil)
+		if rec.Code == http.StatusTooManyRequests {
+			bloqueou = true
+			break
+		}
+	}
+	if !bloqueou {
+		t.Fatal("31 tentativas em um minuto e nenhuma foi bloqueada")
+	}
+}
+
+const tamanhoTokenTeste = 43

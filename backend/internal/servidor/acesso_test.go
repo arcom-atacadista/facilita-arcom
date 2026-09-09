@@ -381,3 +381,112 @@ func TestNaoDaPraAumentarAPropriaAlcada(t *testing.T) {
 		t.Fatalf("status = %d, quer 403 — ninguém mexe no próprio privilégio (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+func TestCoordenacaoNaoPromoveParaGerencia(t *testing.T) {
+	h := servidorComBanco(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+	cookieCoord := criarOperador(t, h, cookieGerencia, "coord@arcom.com.br", "coordenacao", "")
+
+	const emailAnalista, senhaAnalista = "analista2@arcom.com.br", "SenhaForte2026!"
+	rec := chamar(t, h, http.MethodPost, "/api/v1/usuarios", map[string]string{
+		"nome": "Analista", "email": emailAnalista, "senha": senhaAnalista,
+		"papel": "analista", "equipe": "interno",
+	}, cookieGerencia)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("criar analista: status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var criado struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &criado); err != nil {
+		t.Fatalf("resposta inesperada: %s", rec.Body.String())
+	}
+
+	// Coordenação não promove ninguém acima do próprio papel.
+	papel := "gerencia"
+	rec = chamar(t, h, http.MethodPatch, "/api/v1/usuarios/"+criado.ID, map[string]any{"papel": &papel}, cookieCoord)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("promover para gerência: status = %d, quer 422 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAlcadaConcedidaNaoPassaDaDeQuemConcede(t *testing.T) {
+	h := servidorComBanco(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+	// Alçada padrão de coordenação é 100, então reduz pra expor o teto.
+	cookieCoord := criarOperador(t, h, cookieGerencia, "coord2@arcom.com.br", "coordenacao", "")
+
+	rec := chamar(t, h, http.MethodGet, "/api/v1/sessao", nil, cookieCoord)
+	var coord struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &coord); err != nil {
+		t.Fatalf("resposta inesperada: %s", rec.Body.String())
+	}
+	tetoReduzido := 40.0
+	rec = chamar(t, h, http.MethodPatch, "/api/v1/usuarios/"+coord.ID, map[string]any{"alcadaMaxima": &tetoReduzido}, cookieGerencia)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reduzir teto da coordenação: status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	cookieCoord = logar(t, h, "coord2@arcom.com.br", "SenhaForte2026!")
+
+	rec = chamar(t, h, http.MethodPost, "/api/v1/usuarios", map[string]string{
+		"nome": "Analista3", "email": "analista3@arcom.com.br", "senha": "SenhaForte2026!",
+		"papel": "analista", "equipe": "interno",
+	}, cookieCoord)
+	var criado struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &criado); err != nil {
+		t.Fatalf("resposta inesperada: %s", rec.Body.String())
+	}
+
+	acima := 60.0
+	rec = chamar(t, h, http.MethodPatch, "/api/v1/usuarios/"+criado.ID, map[string]any{"alcadaMaxima": &acima}, cookieCoord)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("conceder alçada acima da própria: status = %d, quer 422 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCriarUsuarioComPapelOuEquipeInvalidaDevolve422(t *testing.T) {
+	h := servidorComBanco(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	casos := []map[string]string{
+		{"papel": "diretor", "equipe": "interno"},
+		{"papel": "analista", "equipe": "matriz"},
+	}
+	for _, extra := range casos {
+		corpo := map[string]string{"nome": "X", "email": "x@arcom.com.br", "senha": "SenhaForte2026!"}
+		for k, v := range extra {
+			corpo[k] = v
+		}
+		rec := chamar(t, h, http.MethodPost, "/api/v1/usuarios", corpo, cookie)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%v: status = %d, quer 422 (%s)", extra, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A rota de login é a que mais sofre força bruta — por isso tem rate limit
+// próprio, bem mais apertado que o global (10/min por IP, contra 1200/min).
+func TestLoginTemRateLimitPorIP(t *testing.T) {
+	h := servidorComBanco(t)
+	criarGerencia(t, h)
+
+	corpo := map[string]string{"email": emailGerencia, "senha": "SenhaErrada1"}
+	var bloqueouEm int
+	for i := 1; i <= 10; i++ {
+		rec := chamar(t, h, http.MethodPost, "/api/v1/sessao", corpo)
+		if rec.Code == http.StatusTooManyRequests {
+			bloqueouEm = i
+			break
+		}
+	}
+	if bloqueouEm == 0 {
+		t.Fatal("10 tentativas em um minuto e nenhuma foi bloqueada")
+	}
+}
