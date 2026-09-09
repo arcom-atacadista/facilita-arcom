@@ -47,13 +47,21 @@ func hashToken(token string) []byte {
 
 // Proposta é o que a tela pública mostra.
 type Proposta struct {
-	Cliente       string                   `json:"cliente"`
-	Contrato      string                   `json:"contrato"`
-	ValorOriginal float64                  `json:"valorOriginal"`
-	Vencimento    string                   `json:"vencimento"`
-	DiasAtraso    int                      `json:"diasAtraso"`
-	Ofertas       cobranca.Ofertas         `json:"ofertas"`
-	Acordo        *cobranca.AcordoResposta `json:"acordo"`
+	Cliente string `json:"cliente"`
+
+	// Contrato e Vencimento são do título pelo qual o cliente chegou (o link
+	// foi gerado a partir de um documento), mas a condição é da posição
+	// inteira: não se parcela título isolado na ARCOM.
+	Contrato   string `json:"contrato"`
+	Vencimento string `json:"vencimento"`
+	DiasAtraso int    `json:"diasAtraso"`
+
+	// Posicao é o que o acordo cobre de verdade: todos os títulos em atraso do
+	// CNPJ, com o saldo e a parte que é juros.
+	Posicao cobranca.Posicao `json:"posicao"`
+
+	Ofertas cobranca.Ofertas         `json:"ofertas"`
+	Acordo  *cobranca.AcordoResposta `json:"acordo"`
 }
 
 type EntradaAceite struct {
@@ -81,24 +89,34 @@ func (s *Service) Consultar(ctx context.Context, token string) (Proposta, error)
 		return Proposta{}, err
 	}
 
-	dias := cobranca.DiasAtraso(d.Vencimento, s.agora())
-	politica, err := s.repo.PoliticaDaFaixa(ctx, dias)
+	// A proposta é da posição consolidada do CNPJ, e não do título do link: o
+	// cliente com seis documentos vencidos fecha um acordo, não seis. Sem
+	// escopo de carteira porque quem autoriza aqui é a posse do token.
+	dividas, err := s.repo.DividasAbertasDoCliente(ctx, d.ClienteID)
+	if err != nil {
+		return Proposta{}, err
+	}
+	posicao := cobranca.ConsolidarPosicao(dividas, s.agora())
+
+	politica, err := s.repo.PoliticaDaFaixa(ctx, posicao.DiasAtrasoMaximo)
 	if err != nil {
 		return Proposta{}, err
 	}
 
-	acordo, err := s.repo.AcordoAtivoDaDivida(ctx, d.ID)
+	acordo, err := s.repo.AcordoAtivoDoCliente(ctx, d.ClienteID)
 	if err != nil {
 		return Proposta{}, err
 	}
 
 	p := Proposta{
-		Cliente:       tratamento(d),
-		Contrato:      d.Contrato,
-		ValorOriginal: d.ValorOriginal,
-		Vencimento:    d.Vencimento.Format(cobranca.FormatoData),
-		DiasAtraso:    dias,
-		Ofertas:       cobranca.CalcularOfertas(d.ValorOriginal, politica),
+		Cliente:    tratamento(d),
+		Contrato:   d.Contrato,
+		Vencimento: d.Vencimento.Format(cobranca.FormatoData),
+		DiasAtraso: cobranca.DiasAtraso(d.Vencimento, s.agora()),
+		Posicao:    posicao,
+		// Alçada 100: não há operador na tela pública, o cliente recebe o que a
+		// política concede e a política é o próprio teto.
+		Ofertas: cobranca.CalcularOfertas(posicao, politica, 100),
 	}
 	if acordo != nil {
 		r := cobranca.RespostaDeAcordo(*acordo)

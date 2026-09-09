@@ -40,6 +40,11 @@ type ErroAlcada struct {
 	Teto   float64
 }
 
+// ErrSemPosicaoAberta é o cliente sem nenhum título em atraso aberto: não há
+// o que negociar. Vira 404 na tela, junto com o caso de estar fora do escopo
+// da carteira — os dois respondem igual de propósito.
+var ErrSemPosicaoAberta = errors.New("cliente sem títulos em atraso abertos")
+
 func (e *ErroAlcada) Error() string {
 	return fmt.Sprintf("desconto de %.0f%% acima da alçada de %.0f%%", e.Pedido, e.Teto)
 }
@@ -96,19 +101,43 @@ func normalizarPaginacao(pagina, porPagina int) (int, int) {
 	return pagina, porPagina
 }
 
-// OfertasDaDivida calcula as condições vigentes para uma dívida da carteira
-// do usuário.
-func (s *Service) OfertasDaDivida(ctx context.Context, u acesso.Usuario, id uuid.UUID) (Divida, Ofertas, error) {
+// OfertasDoCliente calcula a condição vigente para a posição consolidada de um
+// CNPJ, limitada pela alçada de quem consulta.
+//
+// Recebe o cliente, e não uma dívida, porque o acordo é sempre do CNPJ: um
+// cliente com seis títulos vencidos fecha um acordo, não seis. O recorte de
+// carteira é aplicado na consulta, então posição de cliente fora do escopo
+// volta vazia — e o handler traduz isso em 404, nunca 403.
+func (s *Service) OfertasDoCliente(ctx context.Context, u acesso.Usuario, clienteID uuid.UUID) (Posicao, Ofertas, error) {
+	dividas, err := s.repo.DividasAbertasDoUsuario(ctx, u, clienteID)
+	if err != nil {
+		return Posicao{}, Ofertas{}, err
+	}
+	if len(dividas) == 0 {
+		return Posicao{}, Ofertas{}, ErrSemPosicaoAberta
+	}
+
+	posicao := ConsolidarPosicao(dividas, s.agora())
+	politica, err := s.repo.PoliticaDaFaixa(ctx, posicao.DiasAtrasoMaximo)
+	if err != nil {
+		return Posicao{}, Ofertas{}, err
+	}
+	return posicao, CalcularOfertas(posicao, politica, u.AlcadaMaxima), nil
+}
+
+// OfertasDaDivida é a mesma coisa a partir de um título: resolve o cliente
+// dele (com escopo) e devolve a posição consolidada do CNPJ. A tela da dívida
+// mostra o título aberto, mas a condição oferecida é sempre a do conjunto.
+func (s *Service) OfertasDaDivida(ctx context.Context, u acesso.Usuario, id uuid.UUID) (Divida, Posicao, Ofertas, error) {
 	d, err := s.repo.DividaDoUsuario(ctx, u, id)
 	if err != nil {
-		return Divida{}, Ofertas{}, err
+		return Divida{}, Posicao{}, Ofertas{}, err
 	}
-	dias := DiasAtraso(d.Vencimento, s.agora())
-	p, err := s.repo.PoliticaDaFaixa(ctx, dias)
+	posicao, ofertas, err := s.OfertasDoCliente(ctx, u, d.ClienteID)
 	if err != nil {
-		return Divida{}, Ofertas{}, err
+		return Divida{}, Posicao{}, Ofertas{}, err
 	}
-	return d, CalcularOfertas(d.ValorOriginal, p), nil
+	return d, posicao, ofertas, nil
 }
 
 // GerarLink cria (ou renova) o link público de negociação de uma dívida e
@@ -149,8 +178,19 @@ func (s *Service) FecharAcordoOperador(ctx context.Context, u acesso.Usuario, e 
 		return Acordo{}, ErrDividaNaoNegociavel
 	}
 
-	dias := DiasAtraso(d.Vencimento, s.agora())
-	politica, err := s.repo.PoliticaDaFaixa(ctx, dias)
+	// O acordo cobre o CNPJ inteiro, mesmo tendo sido aberto a partir de um
+	// título: é a regra do negócio, e é o que evita deixar cinco títulos na
+	// régua cobrando quem já fechou.
+	dividas, err := s.repo.DividasAbertasDoUsuario(ctx, u, d.ClienteID)
+	if err != nil {
+		return Acordo{}, err
+	}
+	if len(dividas) == 0 {
+		return Acordo{}, ErrSemPosicaoAberta
+	}
+
+	posicao := ConsolidarPosicao(dividas, s.agora())
+	politica, err := s.repo.PoliticaDaFaixa(ctx, posicao.DiasAtrasoMaximo)
 	if err != nil {
 		return Acordo{}, err
 	}
@@ -166,35 +206,41 @@ func (s *Service) FecharAcordoOperador(ctx context.Context, u acesso.Usuario, e 
 			fmt.Sprintf("A política desta faixa permite no máximo %d parcela(s).", maxParcelas))
 	}
 
-	total := Centavos(d.ValorOriginal * (1 - e.DescontoPct/100))
-	if teto := MaxParcelasPara(total); e.Parcelas > teto {
+	// Desconto sobre encargos, nunca sobre o saldo inteiro. Mesma conta que a
+	// oferta mostra na tela, para o que o operador fecha bater com o que ele viu.
+	oferta := montarOferta(posicao, e.DescontoPct, e.Parcelas, entradaPctDa(politica, e.Parcelas))
+	if teto := MaxParcelasPara(oferta.ValorTotal); e.Parcelas > teto {
 		return Acordo{}, ErroDeCampo("parcelas",
 			fmt.Sprintf("Com este valor, o máximo é %d parcela(s) — cada parcela precisa ser de pelo menos R$ %.2f.", teto, ValorMinimoParcela))
 	}
 
-	var entrada float64
-	if e.Parcelas > 1 && politica != nil {
-		entrada = Centavos(total * politica.EntradaMinimaPct / 100)
-	}
-
-	return s.gravar(ctx, d, Acordo{
+	return s.gravar(ctx, dividas, Acordo{
+		ClienteID:     d.ClienteID,
 		TipoPagamento: e.TipoPagamento,
 		DescontoPct:   e.DescontoPct,
-		Entrada:       entrada,
+		Entrada:       oferta.Entrada,
 		Parcelas:      e.Parcelas,
-		ValorTotal:    total,
+		ValorTotal:    oferta.ValorTotal,
 		Origem:        OrigemOperador,
 		CriadoPor:     &u.ID,
 	})
 }
 
+// entradaPctDa devolve a entrada mínima da política, e zero no pagamento à
+// vista — entrada num acordo de uma parcela só é a própria parcela.
+func entradaPctDa(p *Politica, parcelas int) float64 {
+	if p == nil || parcelas <= 1 {
+		return 0
+	}
+	return p.EntradaMinimaPct
+}
+
 // gravar monta as parcelas e persiste tudo numa transação. Compartilhado
 // entre o acordo do operador e o do cliente (pacote negociacao).
-func (s *Service) gravar(ctx context.Context, d Divida, base Acordo) (Acordo, error) {
+func (s *Service) gravar(ctx context.Context, dividas []Divida, base Acordo) (Acordo, error) {
 	agora := s.agora()
 
 	base.ID = uuid.New()
-	base.DividaID = d.ID
 	base.Status = StatusAcordoAtivo
 	base.CriadoEm = agora
 	base.AtualizadoEm = agora
@@ -219,6 +265,19 @@ func (s *Service) gravar(ctx context.Context, d Divida, base Acordo) (Acordo, er
 		})
 	}
 
+	// A cobertura guarda a foto do saldo de cada título: a sincronização diária
+	// atualiza a dívida, e sem a foto o acordo deixaria de bater com a soma dos
+	// títulos no dia seguinte.
+	base.Cobertura = make([]AcordoDivida, 0, len(dividas))
+	for _, d := range dividas {
+		base.Cobertura = append(base.Cobertura, AcordoDivida{
+			AcordoID:         base.ID,
+			DividaID:         d.ID,
+			SaldoNoAcordo:    d.ValorOriginal,
+			EncargosNoAcordo: d.ValorEncargos,
+		})
+	}
+
 	if err := s.repo.GravarAcordo(ctx, &base, parcelas); err != nil {
 		// O índice único parcial já barrou um acordo ativo concorrente — só
 		// traduzimos para um conflito que a tela sabe explicar.
@@ -234,17 +293,32 @@ func (s *Service) gravar(ctx context.Context, d Divida, base Acordo) (Acordo, er
 
 // FecharAcordoCliente é o aceite vindo da tela pública. O cliente não escolhe
 // desconto: recebe o que a política da faixa dele oferece.
+//
+// Sem escopo de carteira aqui: quem autoriza é a posse do token do link, não
+// uma sessão. A dívida do token serve para achar o CNPJ; o acordo cobre a
+// posição inteira dele.
 func (s *Service) FecharAcordoCliente(ctx context.Context, d Divida, tipo string, parcelas int) (Acordo, error) {
 	if d.Status != StatusDividaAberta {
 		return Acordo{}, ErrDividaNaoNegociavel
 	}
 
-	dias := DiasAtraso(d.Vencimento, s.agora())
-	politica, err := s.repo.PoliticaDaFaixa(ctx, dias)
+	dividas, err := s.repo.DividasAbertasDoCliente(ctx, d.ClienteID)
 	if err != nil {
 		return Acordo{}, err
 	}
-	ofertas := CalcularOfertas(d.ValorOriginal, politica)
+	if len(dividas) == 0 {
+		return Acordo{}, ErrSemPosicaoAberta
+	}
+
+	posicao := ConsolidarPosicao(dividas, s.agora())
+	politica, err := s.repo.PoliticaDaFaixa(ctx, posicao.DiasAtrasoMaximo)
+	if err != nil {
+		return Acordo{}, err
+	}
+
+	// Alçada 100 porque não há operador na jogada: o cliente recebe o que a
+	// política concede, e a política é o próprio teto.
+	ofertas := CalcularOfertas(posicao, politica, 100)
 
 	var oferta Oferta
 	switch tipo {
@@ -271,7 +345,8 @@ func (s *Service) FecharAcordoCliente(ctx context.Context, d Divida, tipo string
 		pagamento = PagamentoBoleto
 	}
 
-	return s.gravar(ctx, d, Acordo{
+	return s.gravar(ctx, dividas, Acordo{
+		ClienteID:     d.ClienteID,
 		TipoPagamento: pagamento,
 		DescontoPct:   oferta.DescontoPct,
 		Entrada:       oferta.Entrada,

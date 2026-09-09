@@ -29,6 +29,9 @@ func (h *Handler) RotasCarteira(r chi.Router) {
 	r.Get("/", h.Wrapper(h.listarDividas))
 	r.Get("/{id}", h.Wrapper(h.verDivida))
 	r.Post("/{id}/link", h.Wrapper(h.gerarLink))
+	// A posição consolidada é do cliente, não de um título — é o que a mesa de
+	// atendimento consulta para montar as condições na conversa.
+	r.Get("/clientes/{id}/ofertas", h.Wrapper(h.ofertasDoCliente))
 }
 
 func (h *Handler) RotasPoliticas(r chi.Router) {
@@ -83,14 +86,41 @@ func (h *Handler) verDivida(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	d, ofertas, err := h.svc.OfertasDaDivida(r.Context(), u, id)
+	d, posicao, ofertas, err := h.svc.OfertasDaDivida(r.Context(), u, id)
+	if err != nil {
+		return traduzir(err)
+	}
+
+	// A posição vai junto porque a condição oferecida é do CNPJ inteiro, não
+	// deste título: sem ela a tela mostraria um desconto que não fecha com o
+	// valor do documento aberto.
+	return escreverJSON(w, http.StatusOK, map[string]any{
+		"divida":  RespostaDeDivida(d, h.svc.agora()),
+		"posicao": posicao,
+		"ofertas": ofertas,
+	})
+}
+
+// ofertasDoCliente devolve a posição em atraso do CNPJ e as condições
+// calculadas para a alçada de quem consulta.
+func (h *Handler) ofertasDoCliente(w http.ResponseWriter, r *http.Request) error {
+	u, _ := acesso.DoContexto(r.Context())
+	id, err := idDaRota(r)
+	if err != nil {
+		return err
+	}
+
+	posicao, ofertas, err := h.svc.OfertasDoCliente(r.Context(), u, id)
 	if err != nil {
 		return traduzir(err)
 	}
 
 	return escreverJSON(w, http.StatusOK, map[string]any{
-		"divida":  RespostaDeDivida(d, h.svc.agora()),
+		"posicao": posicao,
 		"ofertas": ofertas,
+		// A alçada vai na resposta para a tela poder dizer "sua alçada" na
+		// condição que ela cobre, sem precisar adivinhar pelo papel.
+		"alcadaMaxima": u.AlcadaMaxima,
 	})
 }
 
@@ -216,7 +246,14 @@ func traduzir(err error) error {
 			Codigo: "acima_da_alcada",
 		}
 	case errors.Is(err, ErrAcordoJaExiste):
-		return problema.Conflito("Já existe um acordo ativo para este contrato.")
+		// O acordo agora é do CNPJ, então "já existe" fala do cliente e não de
+		// um contrato — a mensagem antiga mandaria o operador procurar no título
+		// errado.
+		return problema.Conflito("Já existe um acordo ativo para este cliente.")
+	case errors.Is(err, ErrSemPosicaoAberta):
+		// Cliente sem título aberto e cliente fora do escopo respondem igual,
+		// pela mesma razão do ErrNaoEncontrado abaixo.
+		return problema.NaoEncontrado("Nenhum título em atraso aberto para este cliente.")
 	case errors.Is(err, ErrDividaNaoNegociavel):
 		return problema.Conflito("Esta dívida não está aberta para negociação.")
 	case errors.Is(err, ErrNaoEncontrado):

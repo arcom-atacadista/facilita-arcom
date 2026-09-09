@@ -192,11 +192,14 @@ func (r *Repo) ListarCampanhas(ctx context.Context) ([]Campanha, error) {
 
 // --- acordos ---
 
-func (r *Repo) AcordoAtivoDaDivida(ctx context.Context, dividaID uuid.UUID) (*Acordo, error) {
+// AcordoAtivoDoCliente devolve o acordo em vigor do CNPJ, ou nil. Nil não é
+// erro: a maior parte dos clientes da carteira não tem acordo aberto.
+func (r *Repo) AcordoAtivoDoCliente(ctx context.Context, clienteID uuid.UUID) (*Acordo, error) {
 	var a Acordo
-	err := r.db.WithContext(ctx).Preload("Lista", func(db *gorm.DB) *gorm.DB {
-		return db.Order("parcelas.numero")
-	}).Where("divida_id = ? AND status = ?", dividaID, StatusAcordoAtivo).First(&a).Error
+	err := r.db.WithContext(ctx).
+		Preload("Lista", func(db *gorm.DB) *gorm.DB { return db.Order("parcelas.numero") }).
+		Preload("Cobertura").
+		Where("cliente_id = ? AND status = ?", clienteID, StatusAcordoAtivo).First(&a).Error
 	if err != nil {
 		if errors.Is(err, ErrNaoEncontrado) {
 			return nil, nil
@@ -206,12 +209,43 @@ func (r *Repo) AcordoAtivoDaDivida(ctx context.Context, dividaID uuid.UUID) (*Ac
 	return &a, nil
 }
 
-// GravarAcordo grava acordo, parcelas e a virada de status da dívida numa
-// transação só: sem isso, uma falha no meio deixaria acordo sem parcela, ou
-// dívida marcada como negociada sem acordo nenhum.
+// DividasAbertasDoCliente traz os títulos que um acordo novo cobriria.
+//
+// Só os abertos: título já negociado pertence a outro acordo, e recalcular
+// sobre ele daria desconto duas vezes sobre o mesmo encargo.
+func (r *Repo) DividasAbertasDoCliente(ctx context.Context, clienteID uuid.UUID) ([]Divida, error) {
+	var dividas []Divida
+	err := r.db.WithContext(ctx).
+		Where("cliente_id = ? AND status = ?", clienteID, StatusDividaAberta).
+		Order("vencimento").
+		Find(&dividas).Error
+	return dividas, err
+}
+
+// DividasAbertasDoUsuario é DividasAbertasDoCliente com o recorte de carteira.
+//
+// Devolve vazio para cliente fora do escopo, em vez de erro de permissão: é o
+// que faz o handler responder 404 e não 403 — 403 confirmaria que o CNPJ
+// existe na carteira de outro analista.
+func (r *Repo) DividasAbertasDoUsuario(ctx context.Context, u acesso.Usuario, clienteID uuid.UUID) ([]Divida, error) {
+	var dividas []Divida
+	q := r.db.WithContext(ctx).Model(&Divida{}).
+		Where("dividas.cliente_id = ? AND dividas.status = ?", clienteID, StatusDividaAberta)
+	err := aplicarEscopo(q, u).Order("dividas.vencimento").Find(&dividas).Error
+	return dividas, err
+}
+
+// GravarAcordo grava o acordo, suas parcelas, a cobertura de títulos, e marca
+// TODOS os títulos cobertos como negociados.
+//
+// Marcar todos é o ponto: o acordo é do CNPJ, e um título coberto que ficasse
+// como "aberto" voltaria para a régua cobrando quem já fechou acordo.
 func (r *Repo) GravarAcordo(ctx context.Context, a *Acordo, parcelas []Parcela) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(a).Error; err != nil {
+		// Omit das associações: o gorm salvaria Lista e Cobertura junto com o
+		// acordo, e o Create explícito abaixo inseriria as mesmas linhas de
+		// novo — chave duplicada que aparecia como "acordo já existe".
+		if err := tx.Omit("Lista", "Cobertura").Create(a).Error; err != nil {
 			return err
 		}
 		if len(parcelas) > 0 {
@@ -219,13 +253,31 @@ func (r *Repo) GravarAcordo(ctx context.Context, a *Acordo, parcelas []Parcela) 
 				return err
 			}
 		}
-		return tx.Model(&Divida{}).Where("id = ?", a.DividaID).
+		if len(a.Cobertura) == 0 {
+			// Acordo sem título coberto não representa dívida nenhuma; gravar
+			// seria criar um acordo fantasma que ninguém consegue conciliar.
+			return errors.New("acordo sem título coberto")
+		}
+		if err := tx.Create(&a.Cobertura).Error; err != nil {
+			return err
+		}
+
+		ids := make([]uuid.UUID, 0, len(a.Cobertura))
+		for _, c := range a.Cobertura {
+			ids = append(ids, c.DividaID)
+		}
+		return tx.Model(&Divida{}).Where("id IN ?", ids).
 			Updates(map[string]any{"status": StatusDividaNegociada, "atualizado_em": time.Now().UTC()}).Error
 	})
 }
 
 func (r *Repo) ListarAcordos(ctx context.Context, u acesso.Usuario, pagina, porPagina int) ([]Acordo, int64, error) {
-	q := r.db.WithContext(ctx).Model(&Acordo{}).Joins("JOIN dividas ON dividas.id = acordos.divida_id")
+	// O escopo de carteira vem das dívidas cobertas: o acordo aparece para quem
+	// é responsável por pelo menos um dos títulos dele. DISTINCT porque um
+	// acordo com seis títulos casaria seis vezes no join.
+	q := r.db.WithContext(ctx).Model(&Acordo{}).Distinct("acordos.*").
+		Joins("JOIN acordo_dividas ON acordo_dividas.acordo_id = acordos.id").
+		Joins("JOIN dividas ON dividas.id = acordo_dividas.divida_id")
 	q = aplicarEscopo(q, u)
 
 	var total int64

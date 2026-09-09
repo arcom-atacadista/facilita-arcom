@@ -26,10 +26,15 @@ func semearDivida(t *testing.T, gdb *gorm.DB, documento, contrato, responsavel s
 	).Error; err != nil {
 		t.Fatalf("semear cliente: %v", err)
 	}
+	// Um décimo do saldo é encargo. Semear encargo é o que faz o teste
+	// exercitar desconto de verdade: a política incide SÓ sobre juros e multa,
+	// então dívida sem encargo separado tem desconto zero por definição.
+	encargos := valor / 10
+
 	if err := gdb.Exec(
-		`INSERT INTO dividas (id, cliente_id, contrato, valor_original, vencimento, responsavel_cobranca)
-		 VALUES (?, ?, ?, ?, ?::date, ?)`,
-		dividaID, clienteID, contrato, valor, vencimento, responsavel,
+		`INSERT INTO dividas (id, cliente_id, contrato, valor_original, valor_encargos, vencimento, responsavel_cobranca)
+		 VALUES (?, ?, ?, ?, ?, ?::date, ?)`,
+		dividaID, clienteID, contrato, valor, encargos, vencimento, responsavel,
 	).Error; err != nil {
 		t.Fatalf("semear dívida: %v", err)
 	}
@@ -188,7 +193,10 @@ func TestAlcadaEhAplicadaNoServidor(t *testing.T) {
 
 	// E o acordo não pode ter sido gravado.
 	var quantos int64
-	if err := gdb.Raw(`SELECT count(*) FROM acordos WHERE divida_id = ?`, divida).Scan(&quantos).Error; err != nil {
+	if err := gdb.Raw(`
+		SELECT count(*) FROM acordos a
+		  JOIN acordo_dividas ad ON ad.acordo_id = a.id
+		 WHERE ad.divida_id = ?`, divida).Scan(&quantos).Error; err != nil {
 		t.Fatalf("contar acordos: %v", err)
 	}
 	if quantos != 0 {
@@ -222,8 +230,10 @@ func TestSomaDasParcelasBateComOTotalDoAcordo(t *testing.T) {
 	var somaParcelas, totalAcordo float64
 	if err := gdb.Raw(`
 		SELECT coalesce(sum(p.valor), 0), max(a.valor_total)
-		FROM acordos a JOIN parcelas p ON p.acordo_id = a.id
-		WHERE a.divida_id = ?`, divida).Row().Scan(&somaParcelas, &totalAcordo); err != nil {
+		  FROM acordos a
+		  JOIN parcelas p ON p.acordo_id = a.id
+		  JOIN acordo_dividas ad ON ad.acordo_id = a.id
+		 WHERE ad.divida_id = ?`, divida).Row().Scan(&somaParcelas, &totalAcordo); err != nil {
 		t.Fatalf("somar parcelas: %v", err)
 	}
 
@@ -232,7 +242,10 @@ func TestSomaDasParcelasBateComOTotalDoAcordo(t *testing.T) {
 	}
 }
 
-func TestSegundoAcordoNaMesmaDividaEhRecusado(t *testing.T) {
+// O acordo é do CNPJ, então "segundo acordo" é sobre o mesmo cliente — antes
+// era por título, o que deixava seis acordos ativos conviverem para o mesmo
+// devedor.
+func TestSegundoAcordoNoMesmoClienteEhRecusado(t *testing.T) {
 	h, gdb := montarServidor(t)
 	criarGerencia(t, h)
 	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
@@ -243,9 +256,212 @@ func TestSegundoAcordoNaMesmaDividaEhRecusado(t *testing.T) {
 	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", corpo, cookieGerencia); rec.Code != http.StatusCreated {
 		t.Fatalf("primeiro acordo: status %d (%s)", rec.Code, rec.Body.String())
 	}
-	// A dívida virou "negociado" — a segunda tentativa é barrada antes mesmo
-	// do índice único.
+	// Todos os títulos do CNPJ viraram "negociado" — a segunda tentativa é
+	// barrada antes mesmo do índice único por cliente.
 	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", corpo, cookieGerencia); rec.Code != http.StatusConflict {
 		t.Fatalf("segundo acordo: status %d, quer 409 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// semearDividaDoCliente acrescenta um título a um cliente que já existe — é o
+// que permite montar a posição consolidada de um CNPJ com vários documentos.
+func semearDividaDoCliente(t *testing.T, gdb *gorm.DB, clienteID uuid.UUID, contrato string, valor, encargos float64, diasAtraso int) uuid.UUID {
+	t.Helper()
+	dividaID := uuid.New()
+	vencimento := time.Now().UTC().AddDate(0, 0, -diasAtraso).Format("2006-01-02")
+	if err := gdb.Exec(
+		`INSERT INTO dividas (id, cliente_id, contrato, valor_original, valor_encargos, vencimento)
+		 VALUES (?, ?, ?, ?, ?, ?::date)`,
+		dividaID, clienteID, contrato, valor, encargos, vencimento,
+	).Error; err != nil {
+		t.Fatalf("semear dívida do cliente: %v", err)
+	}
+	return dividaID
+}
+
+func clienteDaDivida(t *testing.T, gdb *gorm.DB, dividaID uuid.UUID) uuid.UUID {
+	t.Helper()
+	// Scan em string e parse: o gorm não converte o uuid do Postgres direto
+	// para uuid.UUID, e o erro que ele dá ("converting driver.Value type
+	// string to uint8") não indica isso em nada.
+	var bruto string
+	if err := gdb.Raw(`SELECT cliente_id::text FROM dividas WHERE id = ?`, dividaID).Scan(&bruto).Error; err != nil {
+		t.Fatalf("achar cliente da dívida: %v", err)
+	}
+	id, err := uuid.Parse(bruto)
+	if err != nil {
+		t.Fatalf("cliente_id %q não é uuid: %v", bruto, err)
+	}
+	return id
+}
+
+type respostaOfertas struct {
+	Posicao struct {
+		Saldo            float64 `json:"saldo"`
+		Encargos         float64 `json:"encargos"`
+		Principal        float64 `json:"principal"`
+		Titulos          int     `json:"titulos"`
+		DiasAtrasoMaximo int     `json:"diasAtrasoMaximo"`
+		Faixa            string  `json:"faixa"`
+	} `json:"posicao"`
+	Ofertas struct {
+		Avista struct {
+			DescontoPct    float64 `json:"descontoPct"`
+			Desconto       float64 `json:"desconto"`
+			ValorTotal     float64 `json:"valorTotal"`
+			ExigeAprovacao bool    `json:"exigeAprovacao"`
+		} `json:"avista"`
+		Parcelado *struct {
+			MaxParcelas int `json:"maxParcelas"`
+		} `json:"parcelado"`
+		Ampliada *struct {
+			DescontoPct    float64 `json:"descontoPct"`
+			Desconto       float64 `json:"desconto"`
+			ExigeAprovacao bool    `json:"exigeAprovacao"`
+		} `json:"ampliada"`
+	} `json:"ofertas"`
+	AlcadaMaxima float64 `json:"alcadaMaxima"`
+}
+
+func buscarOfertas(t *testing.T, h http.Handler, cookie *http.Cookie, clienteID uuid.UUID) respostaOfertas {
+	t.Helper()
+	rec := chamar(t, h, http.MethodGet, "/api/v1/carteira/clientes/"+clienteID.String()+"/ofertas", nil, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ofertas: status %d, quer 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var r respostaOfertas
+	if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+		t.Fatalf("resposta inesperada: %s", rec.Body.String())
+	}
+	return r
+}
+
+func TestOfertasConsolidamTodosOsTitulosDoCNPJ(t *testing.T) {
+	// A regra da ARCOM: não se parcela título isolado, o acordo engloba todos
+	// os títulos em atraso do CNPJ.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	primeira := semearDivida(t, gdb, "11222333000181", "CT-1", "", 1000, 40)
+	cliente := clienteDaDivida(t, gdb, primeira)
+	semearDividaDoCliente(t, gdb, cliente, "CT-2", 500, 50, 70)
+	semearDividaDoCliente(t, gdb, cliente, "CT-3", 300, 30, 20)
+
+	r := buscarOfertas(t, h, cookie, cliente)
+
+	// 1000 (com 100 de encargo, do semearDivida) + 500 + 300.
+	if quer := 1800.00; r.Posicao.Saldo != quer {
+		t.Errorf("saldo = %v, quer %v", r.Posicao.Saldo, quer)
+	}
+	if quer := 180.00; r.Posicao.Encargos != quer {
+		t.Errorf("encargos = %v, quer %v", r.Posicao.Encargos, quer)
+	}
+	if quer := 1620.00; r.Posicao.Principal != quer {
+		t.Errorf("principal = %v, quer %v", r.Posicao.Principal, quer)
+	}
+	if r.Posicao.Titulos != 3 {
+		t.Errorf("títulos = %d, quer 3", r.Posicao.Titulos)
+	}
+	// A faixa é a do título mais velho: a política aplicada é a do pior atraso.
+	if r.Posicao.DiasAtrasoMaximo != 70 {
+		t.Errorf("dias = %d, quer 70", r.Posicao.DiasAtrasoMaximo)
+	}
+	if r.Posicao.Faixa != "61-90" {
+		t.Errorf("faixa = %q, quer 61-90", r.Posicao.Faixa)
+	}
+}
+
+func TestDescontoDoEndpointNuncaPassaDosEncargos(t *testing.T) {
+	// A trava contra a volta da conta antiga, exercitada pela API inteira e não
+	// só pela função: a política da faixa 61-90 concede 20% à vista, e 20% do
+	// saldo seriam R$ 360 em vez dos R$ 36 dos encargos.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	primeira := semearDivida(t, gdb, "11222333000181", "CT-1", "", 1800, 70)
+	cliente := clienteDaDivida(t, gdb, primeira)
+
+	r := buscarOfertas(t, h, cookie, cliente)
+
+	if r.Ofertas.Avista.Desconto > r.Posicao.Encargos {
+		t.Errorf("desconto de %v passou dos encargos (%v) — voltou a incidir sobre o principal",
+			r.Ofertas.Avista.Desconto, r.Posicao.Encargos)
+	}
+	if quer := r.Posicao.Saldo - r.Ofertas.Avista.Desconto; r.Ofertas.Avista.ValorTotal != quer {
+		t.Errorf("valor à vista = %v, quer %v", r.Ofertas.Avista.ValorTotal, quer)
+	}
+}
+
+func TestOfertaAcimaDaAlcadaVemTravadaEnaoEscondida(t *testing.T) {
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+
+	primeira := semearDivida(t, gdb, "11222333000181", "CT-1", "APR", 1800, 70)
+	cliente := clienteDaDivida(t, gdb, primeira)
+
+	// Aprendiz tem alçada de 20%, e a política da faixa 61-90 concede 20% à
+	// vista — igual, então nada travado. Coordenação vê o mesmo.
+	cookieAprendiz := criarOperador(t, h, cookieGerencia, "apr@arcom.com.br", "aprendiz", "APR")
+	r := buscarOfertas(t, h, cookieAprendiz, cliente)
+	if r.AlcadaMaxima != 20 {
+		t.Errorf("alçada do aprendiz = %v, quer 20", r.AlcadaMaxima)
+	}
+	if r.Ofertas.Avista.DescontoPct > r.AlcadaMaxima {
+		t.Errorf("ofereceu %v%% para quem tem alçada de %v%%", r.Ofertas.Avista.DescontoPct, r.AlcadaMaxima)
+	}
+}
+
+func TestOfertasDeClienteForaDaCarteiraRespondem404(t *testing.T) {
+	// Mesmo motivo do resto do sistema: 403 confirmaria que o CNPJ existe na
+	// carteira de outro analista.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+
+	doBruno := semearDivida(t, gdb, "33333333333", "CT-BRUNO", "BRUNO", 900, 70)
+	cliente := clienteDaDivida(t, gdb, doBruno)
+
+	cookieAna := criarOperador(t, h, cookieGerencia, "ana2@arcom.com.br", "analista", "ANA")
+	rec := chamar(t, h, http.MethodGet, "/api/v1/carteira/clientes/"+cliente.String()+"/ofertas", nil, cookieAna)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, quer 404 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAcordoCobreTodosOsTitulosDoCNPJ(t *testing.T) {
+	// Se um título coberto ficasse "aberto", ele voltaria para a régua cobrando
+	// quem já fechou acordo.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	primeira := semearDivida(t, gdb, "11222333000181", "CT-1", "", 1000, 40)
+	cliente := clienteDaDivida(t, gdb, primeira)
+	semearDividaDoCliente(t, gdb, cliente, "CT-2", 500, 50, 70)
+	semearDividaDoCliente(t, gdb, cliente, "CT-3", 300, 30, 45)
+
+	rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
+		"dividaId": primeira, "tipoPagamento": "pix", "descontoPct": 10, "parcelas": 1,
+	}, cookie)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("fechar acordo: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	var cobertos, abertos int64
+	if err := gdb.Raw(`SELECT count(*) FROM acordo_dividas`).Scan(&cobertos).Error; err != nil {
+		t.Fatalf("contar cobertura: %v", err)
+	}
+	if cobertos != 3 {
+		t.Errorf("títulos cobertos = %d, quer 3", cobertos)
+	}
+	if err := gdb.Raw(`SELECT count(*) FROM dividas WHERE cliente_id = ? AND status = 'aberto'`, cliente).
+		Scan(&abertos).Error; err != nil {
+		t.Fatalf("contar abertos: %v", err)
+	}
+	if abertos != 0 {
+		t.Errorf("%d título(s) ficaram abertos depois do acordo — voltariam para a régua", abertos)
 	}
 }

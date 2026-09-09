@@ -51,10 +51,27 @@ type Debito struct {
 
 // LinhaCarteira é o débito já traduzido para o vocabulário da cobrança.
 type LinhaCarteira struct {
-	NomeCliente         string
-	Documento           string
-	Contrato            string
-	Valor               float64
+	NomeCliente string
+	Documento   string
+	Contrato    string
+
+	// Valor é o saldo devedor — o que o cliente deve hoje, e a base de tudo
+	// que a tela mostra.
+	Valor float64
+
+	// Encargos é a parte do saldo que é juros e multa, e não mercadoria.
+	//
+	// É O CAMPO QUE DECIDE QUANTO DE DESCONTO EXISTE: a política da ARCOM
+	// concede desconto somente sobre encargos, nunca sobre o principal. Um
+	// desconto de 20% num saldo de R$ 84 mil com R$ 4 mil de encargos vale
+	// R$ 800, não R$ 16 mil.
+	//
+	// Zero quando não dá para separar, e aí o desconto calculado é zero
+	// também. É o lado seguro do erro: deixar de oferecer desconto é uma
+	// conversa com o analista, oferecer desconto que a empresa não autorizou
+	// é prejuízo que já saiu.
+	Encargos float64
+
 	Vencimento          string
 	Filial              string
 	ResponsavelCobranca string
@@ -185,16 +202,27 @@ func Mapear(d Debito, m Mapeamento) (LinhaCarteira, error) {
 		}
 	}
 
-	valor := d.ValorLiquido
+	// O dataset traz dois campos de valor, e a diferença entre eles é o que
+	// separa mercadoria de encargo. Qual é o saldo e qual é o valor de face
+	// ainda está com a TI (ver o bloco no topo), então o mapeamento manda: o
+	// campo escolhido é o saldo, o outro é o principal.
+	saldo, principal := d.ValorLiquido, d.DebValorDocumento
 	if m.Valor == ValorDocumento {
-		valor = d.DebValorDocumento
+		saldo, principal = d.DebValorDocumento, d.ValorLiquido
 	}
-	if valor <= 0 {
-		if m.Valor == ValorDocumento {
-			valor = d.ValorLiquido
-		} else {
-			valor = d.DebValorDocumento
-		}
+	if saldo <= 0 {
+		// Um campo zerado não deve descartar a linha se o outro tem conteúdo:
+		// a dívida existe, só não dá para separar encargo dela.
+		saldo, principal = principal, 0
+	}
+	valor := saldo
+
+	// Encargos só existe quando o saldo é MAIOR que o principal. Se vier o
+	// contrário, a semântica dos campos não é a que assumimos — e aí a conta
+	// certa é zero, não um número negativo que viraria desconto invertido.
+	encargos := 0.0
+	if principal > 0 && saldo > principal {
+		encargos = saldo - principal
 	}
 
 	documento := primeiroNaoVazio(d.CNPJ, d.Documento)
@@ -218,6 +246,7 @@ func Mapear(d Debito, m Mapeamento) (LinhaCarteira, error) {
 		Documento:           somenteDigitos(documento),
 		Contrato:            d.SeqDebito,
 		Valor:               valor,
+		Encargos:            encargos,
 		Vencimento:          vencimento[:min(10, len(vencimento))],
 		Filial:              d.Filial,
 		ResponsavelCobranca: d.ResponsavelCobranca,

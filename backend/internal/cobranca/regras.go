@@ -66,57 +66,163 @@ func MaxParcelasPara(total float64) int {
 // Oferta é uma condição que o cliente pode aceitar.
 type Oferta struct {
 	DescontoPct float64 `json:"descontoPct"`
+
+	// Desconto é o valor abatido em reais. Sai de DescontoPct aplicado SOBRE OS
+	// ENCARGOS, não sobre o saldo — ver CalcularOfertas.
+	Desconto float64 `json:"desconto"`
+
 	ValorTotal  float64 `json:"valorTotal"`
 	Economia    float64 `json:"economia"`
 	MaxParcelas int     `json:"maxParcelas"`
 	Entrada     float64 `json:"entrada"`
+
+	// ExigeAprovacao marca a condição que passa da alçada de quem está
+	// olhando. A tela mostra, e mostra travada: o analista precisa saber que a
+	// condição existe para pedir aprovação, e precisa não oferecer antes.
+	ExigeAprovacao bool `json:"exigeAprovacao"`
 }
 
-// Ofertas são as condições calculadas para uma dívida. Parcelado é nulo
-// quando a política daquela faixa só permite à vista.
+// Ofertas são as condições calculadas para uma posição em atraso. Parcelado é
+// nulo quando a política daquela faixa só permite à vista.
 type Ofertas struct {
 	Avista    Oferta  `json:"avista"`
 	Parcelado *Oferta `json:"parcelado"`
+
+	// Ampliada é a condição acima da alçada de quem consulta, quando a política
+	// da faixa permite mais do que essa pessoa pode conceder sozinha. Nula
+	// quando a alçada já cobre o teto da política.
+	Ampliada *Oferta `json:"ampliada"`
 }
 
-// CalcularOfertas aplica a política da faixa sobre o valor original.
-// Política nula (dívida fora da régua) significa nenhum desconto e pagamento
-// à vista — nunca "desconto livre".
-func CalcularOfertas(valorOriginal float64, p *Politica) Ofertas {
-	var descAvista, descParcelado, entradaPct float64
-	maxParcelas := 1
-	if p != nil {
-		descAvista, descParcelado = p.DescontoAvista, p.DescontoParcelado
-		entradaPct, maxParcelas = p.EntradaMinimaPct, p.MaxParcelas
-	}
+// Posicao é o conjunto de títulos em atraso de um mesmo CNPJ.
+//
+// O acordo é sempre do CNPJ, nunca de um título isolado: é regra de negócio da
+// ARCOM, e é por isso que o cálculo recebe a posição consolidada em vez de uma
+// dívida. Um cliente com seis títulos vencidos fecha um acordo, não seis.
+type Posicao struct {
+	// Saldo é a soma do que o cliente deve nos títulos em atraso.
+	Saldo float64 `json:"saldo"`
 
-	totalAvista := Centavos(valorOriginal * (1 - descAvista/100))
-	ofertas := Ofertas{
-		Avista: Oferta{
-			DescontoPct: descAvista,
-			ValorTotal:  totalAvista,
-			Economia:    Centavos(valorOriginal - totalAvista),
-			MaxParcelas: 1,
-		},
-	}
+	// Encargos é a parte do saldo que é juros e multa, somada. É a base do
+	// desconto.
+	Encargos float64 `json:"encargos"`
 
-	// O teto da política é limitado pelo que o valor comporta: uma política
-	// de 10x aplicada a uma dívida de R$ 80 vira 4x, não 10 parcelas de R$ 8.
-	if teto := MaxParcelasPara(Centavos(valorOriginal * (1 - descParcelado/100))); maxParcelas > teto {
-		maxParcelas = teto
-	}
+	// Principal é o resto: mercadoria, sobre a qual não há desconto.
+	Principal float64 `json:"principal"`
 
-	if maxParcelas > 1 {
-		totalParcelado := Centavos(valorOriginal * (1 - descParcelado/100))
-		ofertas.Parcelado = &Oferta{
-			DescontoPct: descParcelado,
-			ValorTotal:  totalParcelado,
-			Economia:    Centavos(valorOriginal - totalParcelado),
-			MaxParcelas: maxParcelas,
-			Entrada:     Centavos(totalParcelado * entradaPct / 100),
+	// Titulos é quantos documentos o acordo cobriria.
+	Titulos int `json:"titulos"`
+
+	// DiasAtrasoMaximo é o do título mais velho, e é ele que define a faixa —
+	// a política aplicada é a do pior atraso, não a média.
+	DiasAtrasoMaximo int `json:"diasAtrasoMaximo"`
+
+	Faixa Faixa `json:"faixa"`
+}
+
+// ConsolidarPosicao soma os títulos em atraso num só conjunto.
+//
+// Ignora o que não está em atraso e o que já foi negociado: o acordo novo é
+// sobre o que ainda está aberto.
+func ConsolidarPosicao(dividas []Divida, agora time.Time) Posicao {
+	var p Posicao
+	for _, d := range dividas {
+		if d.Status != StatusDividaAberta {
+			continue
+		}
+		dias := DiasAtraso(d.Vencimento, agora)
+		if dias < 0 {
+			continue // ainda não venceu
+		}
+
+		p.Saldo = Centavos(p.Saldo + d.ValorOriginal)
+		p.Encargos = Centavos(p.Encargos + d.ValorEncargos)
+		p.Titulos++
+		if dias > p.DiasAtrasoMaximo {
+			p.DiasAtrasoMaximo = dias
 		}
 	}
+	p.Principal = Centavos(p.Saldo - p.Encargos)
+	p.Faixa = FaixaDe(p.DiasAtrasoMaximo)
+	return p
+}
+
+// CalcularOfertas aplica a política da faixa sobre a posição consolidada,
+// limitada pela alçada de quem está consultando.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// O DESCONTO INCIDE SOMENTE SOBRE OS ENCARGOS
+//
+// É política da ARCOM: juros e multa são negociáveis, mercadoria não. A conta
+// antiga aplicava o percentual sobre o saldo inteiro, o que num saldo de
+// R$ 84.210,00 com R$ 4.370,00 de encargos transformava 20% de desconto em
+// R$ 16.842,00 de abatimento em vez de R$ 874,00 — dezenove vezes mais, numa
+// tela em que o cliente fecha o acordo sozinho.
+//
+// Posição sem encargos separados (valor_encargos zerado, que é o estado de
+// toda dívida enquanto a semântica dos campos do Gateway não é confirmada)
+// resulta em desconto zero. É o lado seguro: deixar de oferecer desconto é uma
+// conversa com o analista, oferecer o que a empresa não autorizou é prejuízo.
+//
+// alcadaPct é o teto de quem consulta (usuarios.alcada_maxima). A política
+// pode permitir mais do que a pessoa pode conceder — e aí a condição maior vem
+// em Ampliada, marcada como exigindo aprovação, em vez de ser escondida: o
+// analista precisa saber que ela existe para pedir aprovação.
+// ─────────────────────────────────────────────────────────────────────────
+func CalcularOfertas(p Posicao, pol *Politica, alcadaPct float64) Ofertas {
+	var descAvista, descParcelado, entradaPct float64
+	maxParcelas := 1
+	if pol != nil {
+		descAvista, descParcelado = pol.DescontoAvista, pol.DescontoParcelado
+		entradaPct, maxParcelas = pol.EntradaMinimaPct, pol.MaxParcelas
+	}
+
+	ofertas := Ofertas{
+		Avista: montarOferta(p, min(descAvista, alcadaPct), 1, 0),
+	}
+
+	// O teto da política é limitado pelo que o valor comporta: uma política de
+	// 10x aplicada a um saldo de R$ 80 vira 4x, não 10 parcelas de R$ 8.
+	parcelado := montarOferta(p, min(descParcelado, alcadaPct), maxParcelas, entradaPct)
+	if teto := MaxParcelasPara(parcelado.ValorTotal); maxParcelas > teto {
+		maxParcelas = teto
+		parcelado = montarOferta(p, min(descParcelado, alcadaPct), maxParcelas, entradaPct)
+	}
+	if maxParcelas > 1 {
+		ofertas.Parcelado = &parcelado
+	}
+
+	// A condição que a política permite e a alçada não: existe só quando o teto
+	// da faixa passa do que a pessoa pode conceder.
+	if tetoDaPolitica := max(descAvista, descParcelado); tetoDaPolitica > alcadaPct {
+		ampliada := montarOferta(p, tetoDaPolitica, 1, 0)
+		ampliada.ExigeAprovacao = true
+		ofertas.Ampliada = &ampliada
+	}
+
 	return ofertas
+}
+
+// montarOferta é a conta única de desconto do sistema: percentual sobre
+// encargos, abatido do saldo.
+func montarOferta(p Posicao, descontoPct float64, parcelas int, entradaPct float64) Oferta {
+	if descontoPct < 0 {
+		descontoPct = 0
+	}
+	desconto := Centavos(p.Encargos * descontoPct / 100)
+	total := Centavos(p.Saldo - desconto)
+
+	if parcelas < 1 {
+		parcelas = 1
+	}
+	return Oferta{
+		DescontoPct: descontoPct,
+		Desconto:    desconto,
+		ValorTotal:  total,
+		Economia:    desconto,
+		MaxParcelas: parcelas,
+		Entrada:     Centavos(total * entradaPct / 100),
+	}
 }
 
 // Centavos arredonda para duas casas. Dinheiro em float64 acumula resto

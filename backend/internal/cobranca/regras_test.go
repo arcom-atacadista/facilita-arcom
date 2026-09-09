@@ -99,59 +99,172 @@ func TestDividirParcelasSempreSomaOTotal(t *testing.T) {
 	}
 }
 
+// posicaoDoExemplo são os números que o desenho da mesa usa, e servem de
+// documentação executável da política: saldo de R$ 84.210,00 do qual
+// R$ 4.370,00 é juros e multa.
+func posicaoDoExemplo() cobranca.Posicao {
+	return cobranca.Posicao{
+		Saldo:            84210.00,
+		Encargos:         4370.00,
+		Principal:        79840.00,
+		Titulos:          6,
+		DiasAtrasoMaximo: 42,
+	}
+}
+
+func TestDescontoIncideSomenteSobreEncargos(t *testing.T) {
+	// A REGRA MAIS CARA DO SISTEMA. A política da ARCOM concede desconto só
+	// sobre juros e multa, nunca sobre mercadoria. A conta antiga aplicava o
+	// percentual no saldo inteiro e transformava 20% em R$ 16.842,00 de
+	// abatimento em vez de R$ 874,00 — dezenove vezes mais, numa tela em que o
+	// cliente fecha o acordo sozinho.
+	p := &cobranca.Politica{DescontoAvista: 20, MaxParcelas: 1}
+	o := cobranca.CalcularOfertas(posicaoDoExemplo(), p, 100)
+
+	if quer := 874.00; o.Avista.Desconto != quer {
+		t.Errorf("desconto = %v, quer %v (20%% de R$ 4.370,00 de encargos)", o.Avista.Desconto, quer)
+	}
+	if quer := 83336.00; o.Avista.ValorTotal != quer {
+		t.Errorf("valor à vista = %v, quer %v", o.Avista.ValorTotal, quer)
+	}
+	// A trava contra a volta da conta antiga: 20% do saldo seriam R$ 16.842,00.
+	if o.Avista.Desconto > posicaoDoExemplo().Encargos {
+		t.Errorf("desconto de %v passou dos encargos (%v) — o desconto voltou a incidir sobre o principal",
+			o.Avista.Desconto, posicaoDoExemplo().Encargos)
+	}
+}
+
+func TestSemEncargosSeparadosNaoDaDesconto(t *testing.T) {
+	// Estado de toda dívida enquanto a semântica dos campos do Gateway não é
+	// confirmada. Zero desconto é o lado seguro do erro: deixar de oferecer é
+	// uma conversa com o analista, oferecer o que a empresa não autorizou é
+	// prejuízo que já saiu.
+	posicao := cobranca.Posicao{Saldo: 10000, Encargos: 0, Principal: 10000, Titulos: 1, DiasAtrasoMaximo: 40}
+	p := &cobranca.Politica{DescontoAvista: 50, DescontoParcelado: 50, MaxParcelas: 6}
+
+	o := cobranca.CalcularOfertas(posicao, p, 100)
+	if o.Avista.Desconto != 0 {
+		t.Errorf("desconto sem encargos separados = %v, quer 0", o.Avista.Desconto)
+	}
+	if o.Avista.ValorTotal != 10000 {
+		t.Errorf("valor à vista = %v, quer o saldo cheio 10000", o.Avista.ValorTotal)
+	}
+}
+
 func TestCalcularOfertasSemPoliticaNaoDaDesconto(t *testing.T) {
 	// Dívida fora da régua (menos de 3 ou mais de 90 dias) não tem política.
 	// O default nunca pode ser "desconto livre".
-	o := cobranca.CalcularOfertas(1000, nil)
+	o := cobranca.CalcularOfertas(posicaoDoExemplo(), nil, 100)
 
 	if o.Avista.DescontoPct != 0 {
 		t.Errorf("desconto à vista sem política = %v, quer 0", o.Avista.DescontoPct)
 	}
-	if o.Avista.ValorTotal != 1000 {
-		t.Errorf("valor à vista sem política = %v, quer 1000", o.Avista.ValorTotal)
+	if quer := 84210.00; o.Avista.ValorTotal != quer {
+		t.Errorf("valor à vista sem política = %v, quer o saldo cheio %v", o.Avista.ValorTotal, quer)
 	}
 	if o.Parcelado != nil {
 		t.Error("sem política não pode haver parcelamento")
 	}
 }
 
-func TestCalcularOfertasAplicaAPolitica(t *testing.T) {
+func TestAlcadaLimitaODescontoEExpoeACondicaoTravada(t *testing.T) {
+	// A política permite 50%, o usuário só pode 20%. A condição maior não é
+	// escondida: o analista precisa saber que ela existe para pedir aprovação,
+	// e precisa não oferecer antes de conseguir.
+	p := &cobranca.Politica{DescontoAvista: 50, DescontoParcelado: 50, MaxParcelas: 3}
+	o := cobranca.CalcularOfertas(posicaoDoExemplo(), p, 20)
+
+	if quer := 20.0; o.Avista.DescontoPct != quer {
+		t.Errorf("desconto oferecido = %v%%, quer o teto da alçada (%v%%)", o.Avista.DescontoPct, quer)
+	}
+	if o.Avista.ExigeAprovacao {
+		t.Error("a condição dentro da alçada não deveria exigir aprovação")
+	}
+
+	if o.Ampliada == nil {
+		t.Fatal("política de 50%% com alçada de 20%% deveria expor a condição ampliada")
+	}
+	if quer := 50.0; o.Ampliada.DescontoPct != quer {
+		t.Errorf("desconto ampliado = %v%%, quer %v%%", o.Ampliada.DescontoPct, quer)
+	}
+	if !o.Ampliada.ExigeAprovacao {
+		t.Error("a condição acima da alçada tem que vir marcada como exigindo aprovação")
+	}
+	if quer := 2185.00; o.Ampliada.Desconto != quer {
+		t.Errorf("desconto ampliado = %v, quer %v (50%% dos encargos)", o.Ampliada.Desconto, quer)
+	}
+}
+
+func TestAlcadaQueCobreAPoliticaNaoExpoeCondicaoTravada(t *testing.T) {
+	p := &cobranca.Politica{DescontoAvista: 20, DescontoParcelado: 10, MaxParcelas: 3}
+	if o := cobranca.CalcularOfertas(posicaoDoExemplo(), p, 60); o.Ampliada != nil {
+		t.Error("alçada acima do teto da política não deveria produzir condição travada")
+	}
+}
+
+func TestParceladoNuncaSaiMaisBaratoQueAvista(t *testing.T) {
+	// Seria vantagem financeira em atrasar, e o desconto à vista existe
+	// justamente para o contrário.
 	p := &cobranca.Politica{
 		DescontoAvista:    20,
 		DescontoParcelado: 10,
 		MaxParcelas:       10,
 		EntradaMinimaPct:  15,
 	}
-	o := cobranca.CalcularOfertas(1250.90, p)
-
-	if quer := 1000.72; o.Avista.ValorTotal != quer {
-		t.Errorf("valor à vista = %v, quer %v", o.Avista.ValorTotal, quer)
-	}
-	if quer := 250.18; o.Avista.Economia != quer {
-		t.Errorf("economia à vista = %v, quer %v", o.Avista.Economia, quer)
-	}
+	o := cobranca.CalcularOfertas(posicaoDoExemplo(), p, 100)
 
 	if o.Parcelado == nil {
 		t.Fatal("política com max_parcelas 10 deveria oferecer parcelamento")
 	}
-	if quer := 1125.81; o.Parcelado.ValorTotal != quer {
-		t.Errorf("valor parcelado = %v, quer %v", o.Parcelado.ValorTotal, quer)
-	}
-	if quer := 168.87; o.Parcelado.Entrada != quer {
-		t.Errorf("entrada = %v, quer %v", o.Parcelado.Entrada, quer)
-	}
-
-	// O parcelado nunca pode sair mais barato que o à vista — seria vantagem
-	// financeira em atrasar, e o desconto à vista existe justamente por isso.
 	if o.Parcelado.ValorTotal < o.Avista.ValorTotal {
 		t.Errorf("parcelado (%v) saiu menor que à vista (%v)", o.Parcelado.ValorTotal, o.Avista.ValorTotal)
+	}
+	if quer := 437.00; o.Parcelado.Desconto != quer {
+		t.Errorf("desconto parcelado = %v, quer %v (10%% dos encargos)", o.Parcelado.Desconto, quer)
 	}
 }
 
 func TestCalcularOfertasPoliticaSemParcelamento(t *testing.T) {
 	p := &cobranca.Politica{DescontoAvista: 5, MaxParcelas: 1}
-	if o := cobranca.CalcularOfertas(500, p); o.Parcelado != nil {
-		t.Error("max_parcelas 1 não pode gerar oferta parcelada")
+	if o := cobranca.CalcularOfertas(posicaoDoExemplo(), p, 100); o.Parcelado != nil {
+		t.Error("política com max_parcelas 1 não pode oferecer parcelamento")
+	}
+}
+
+func TestConsolidarPosicaoSoSomaTituloAbertoEVencido(t *testing.T) {
+	agora := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
+	dividas := []cobranca.Divida{
+		// Em atraso e aberto: entra.
+		{Status: "aberto", ValorOriginal: 1000, ValorEncargos: 100, Vencimento: agora.AddDate(0, 0, -40)},
+		{Status: "aberto", ValorOriginal: 500, ValorEncargos: 50, Vencimento: agora.AddDate(0, 0, -70)},
+		// Já negociado: pertence a outro acordo, e recalcular daria desconto
+		// duas vezes sobre o mesmo encargo.
+		{Status: "negociado", ValorOriginal: 9999, ValorEncargos: 999, Vencimento: agora.AddDate(0, 0, -50)},
+		// Ainda não venceu: não é carteira em atraso.
+		{Status: "aberto", ValorOriginal: 7777, ValorEncargos: 777, Vencimento: agora.AddDate(0, 0, 10)},
+	}
+
+	p := cobranca.ConsolidarPosicao(dividas, agora)
+
+	if quer := 1500.00; p.Saldo != quer {
+		t.Errorf("saldo = %v, quer %v", p.Saldo, quer)
+	}
+	if quer := 150.00; p.Encargos != quer {
+		t.Errorf("encargos = %v, quer %v", p.Encargos, quer)
+	}
+	if quer := 1350.00; p.Principal != quer {
+		t.Errorf("principal = %v, quer %v", p.Principal, quer)
+	}
+	if p.Titulos != 2 {
+		t.Errorf("títulos = %d, quer 2", p.Titulos)
+	}
+	// A faixa é a do título mais velho, não a média: a política aplicada é a do
+	// pior atraso.
+	if p.DiasAtrasoMaximo != 70 {
+		t.Errorf("dias de atraso = %d, quer 70 (o título mais velho)", p.DiasAtrasoMaximo)
+	}
+	if quer := cobranca.Faixa61a90; p.Faixa != quer {
+		t.Errorf("faixa = %v, quer %v", p.Faixa, quer)
 	}
 }
 
@@ -218,7 +331,10 @@ func TestOfertaNuncaOferecePrestacaoAbaixoDoPiso(t *testing.T) {
 	// que o valor comporta, senão a tela oferece um parcelamento que o
 	// servidor vai recusar no aceite.
 	p := &cobranca.Politica{DescontoParcelado: 10, MaxParcelas: 10}
-	o := cobranca.CalcularOfertas(90, p)
+	// Saldo de R$ 90 com R$ 90 de encargos: o caso extremo em que o desconto
+	// morde o máximo possível, e ainda assim o teto de parcelas tem que cair.
+	posicao := cobranca.Posicao{Saldo: 90, Encargos: 90, Titulos: 1, DiasAtrasoMaximo: 40}
+	o := cobranca.CalcularOfertas(posicao, p, 100)
 
 	if o.Parcelado == nil {
 		t.Fatal("R$ 90 com desconto de 10% comporta parcelamento")

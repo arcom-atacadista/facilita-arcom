@@ -60,7 +60,12 @@ type Divida struct {
 	ID            uuid.UUID `gorm:"type:uuid;primaryKey"`
 	ClienteID     uuid.UUID `gorm:"type:uuid;column:cliente_id"`
 	Contrato      string
-	ValorOriginal float64   `gorm:"column:valor_original"`
+	ValorOriginal float64 `gorm:"column:valor_original"`
+
+	// ValorEncargos é a parte do saldo que é juros e multa. É a base de todo
+	// desconto: a política da ARCOM não concede desconto sobre mercadoria.
+	// Zero significa "não sei separar", e aí o desconto calculado é zero.
+	ValorEncargos float64   `gorm:"column:valor_encargos"`
 	Vencimento    time.Time `gorm:"type:date"`
 	Status        string
 
@@ -165,10 +170,15 @@ const (
 )
 
 type Acordo struct {
-	ID            uuid.UUID `gorm:"type:uuid;primaryKey"`
-	DividaID      uuid.UUID `gorm:"type:uuid;column:divida_id"`
-	TipoPagamento string    `gorm:"column:tipo_pagamento"`
-	DescontoPct   float64   `gorm:"column:desconto_pct"`
+	ID uuid.UUID `gorm:"type:uuid;primaryKey"`
+
+	// ClienteID e não DividaID: o acordo é do CNPJ e cobre todos os títulos em
+	// atraso dele (regra de negócio da ARCOM — não se parcela título isolado).
+	// Quais títulos cobre está em Cobertura.
+	ClienteID uuid.UUID `gorm:"type:uuid;column:cliente_id"`
+
+	TipoPagamento string  `gorm:"column:tipo_pagamento"`
+	DescontoPct   float64 `gorm:"column:desconto_pct"`
 	Entrada       float64
 	Parcelas      int
 	ValorTotal    float64 `gorm:"column:valor_total"`
@@ -179,10 +189,27 @@ type Acordo struct {
 	CriadoEm      time.Time  `gorm:"column:criado_em"`
 	AtualizadoEm  time.Time  `gorm:"column:atualizado_em"`
 
-	Lista []Parcela `gorm:"foreignKey:AcordoID"`
+	Lista     []Parcela      `gorm:"foreignKey:AcordoID"`
+	Cobertura []AcordoDivida `gorm:"foreignKey:AcordoID"`
 }
 
 func (Acordo) TableName() string { return "acordos" }
+
+// AcordoDivida liga o acordo aos títulos que ele cobre, com a foto do saldo no
+// momento do fechamento.
+//
+// A foto existe porque a sincronização diária atualiza a dívida: sem ela, um
+// acordo fechado hoje deixaria de bater com a soma dos títulos amanhã, e
+// ninguém saberia dizer se a diferença foi desconto ou juros que correram.
+type AcordoDivida struct {
+	AcordoID uuid.UUID `gorm:"type:uuid;column:acordo_id;primaryKey"`
+	DividaID uuid.UUID `gorm:"type:uuid;column:divida_id;primaryKey"`
+
+	SaldoNoAcordo    float64 `gorm:"column:saldo_no_acordo"`
+	EncargosNoAcordo float64 `gorm:"column:encargos_no_acordo"`
+}
+
+func (AcordoDivida) TableName() string { return "acordo_dividas" }
 
 type Parcela struct {
 	ID         uuid.UUID `gorm:"type:uuid;primaryKey"`
@@ -233,8 +260,13 @@ type PoliticaResposta struct {
 }
 
 type AcordoResposta struct {
-	ID            uuid.UUID         `json:"id"`
-	DividaID      uuid.UUID         `json:"dividaId"`
+	ID        uuid.UUID `json:"id"`
+	ClienteID uuid.UUID `json:"clienteId"`
+
+	// Titulos é quantos documentos o acordo cobre. A tela mostra "6 títulos"
+	// em vez de um contrato só, que era o que o modelo antigo permitia dizer.
+	Titulos int `json:"titulos"`
+
 	TipoPagamento string            `json:"tipoPagamento"`
 	DescontoPct   float64           `json:"descontoPct"`
 	Entrada       float64           `json:"entrada"`
@@ -294,8 +326,9 @@ func RespostaDeAcordo(a Acordo) AcordoResposta {
 		})
 	}
 	return AcordoResposta{
-		ID: a.ID, DividaID: a.DividaID, TipoPagamento: a.TipoPagamento,
-		DescontoPct: a.DescontoPct, Entrada: a.Entrada, Parcelas: a.Parcelas,
+		ID: a.ID, ClienteID: a.ClienteID, Titulos: len(a.Cobertura),
+		TipoPagamento: a.TipoPagamento,
+		DescontoPct:   a.DescontoPct, Entrada: a.Entrada, Parcelas: a.Parcelas,
 		ValorTotal: a.ValorTotal, Status: a.Status, Origem: a.Origem,
 		CriadoEm: a.CriadoEm, Lista: lista,
 	}

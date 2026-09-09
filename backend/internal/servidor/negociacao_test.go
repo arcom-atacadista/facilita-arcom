@@ -101,8 +101,11 @@ func TestClienteNegociaPeloLinkSemLogin(t *testing.T) {
 	if p.Ofertas.Avista.DescontoPct != 10 {
 		t.Errorf("desconto à vista = %v, quer 10 (política da faixa 31-60)", p.Ofertas.Avista.DescontoPct)
 	}
-	if p.Ofertas.Avista.ValorTotal != 900 {
-		t.Errorf("valor à vista = %v, quer 900", p.Ofertas.Avista.ValorTotal)
+	// R$ 1.000 de saldo com R$ 100 de encargos: 10% incidem sobre os R$ 100,
+	// então o abatimento é R$ 10 e o total fica R$ 990. Pela conta antiga
+	// seriam R$ 900 — dez vezes mais desconto do que a política concede.
+	if p.Ofertas.Avista.ValorTotal != 990 {
+		t.Errorf("valor à vista = %v, quer 990 (10%% sobre R$ 100 de encargos)", p.Ofertas.Avista.ValorTotal)
 	}
 	if p.Acordo != nil {
 		t.Error("dívida sem acordo não pode vir com acordo na proposta")
@@ -157,7 +160,10 @@ func TestAceiteEmDobroNoMesmoLinkEhRecusado(t *testing.T) {
 	}
 
 	var quantos int64
-	if err := gdb.Raw(`SELECT count(*) FROM acordos WHERE divida_id = ?`, divida).Scan(&quantos).Error; err != nil {
+	if err := gdb.Raw(`
+		SELECT count(*) FROM acordos a
+		  JOIN acordo_dividas ad ON ad.acordo_id = a.id
+		 WHERE ad.divida_id = ?`, divida).Scan(&quantos).Error; err != nil {
 		t.Fatalf("contar acordos: %v", err)
 	}
 	if quantos != 1 {
