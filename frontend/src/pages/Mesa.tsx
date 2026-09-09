@@ -16,7 +16,7 @@
 // mostrar o campo desabilitado.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { keepPreviousData } from "@tanstack/react-query";
-import { Clock, Search, Send, User } from "lucide-react";
+import { Clock, Search, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Cabecalho } from "../components/Shell";
@@ -24,7 +24,7 @@ import { Aviso, Botao, Carregando, Etiqueta, Vazio } from "../components/ui";
 import type { TomEtiqueta } from "../components/ui";
 import { api } from "../core/api";
 import { cn } from "../core/cn";
-import { dataHora } from "../core/formato";
+import { ROTULO_FAIXA, dataHora, moeda, porcentagem } from "../core/formato";
 import { notificar } from "../core/toast";
 import type { ErroApi } from "../core/erro";
 import type { Lista } from "../tipos/api";
@@ -41,6 +41,38 @@ type Conversa = {
   naoLidas: number;
   previa: string | null;
   previaDoCliente: boolean;
+};
+
+type Oferta = {
+  descontoPct: number;
+  desconto: number;
+  valorTotal: number;
+  economia: number;
+  maxParcelas: number;
+  entrada: number;
+  exigeAprovacao: boolean;
+};
+
+type Ofertas = {
+  avista: Oferta;
+  parcelado: Oferta | null;
+  /** A condição que a política concede e a alçada de quem olha não cobre. */
+  ampliada: Oferta | null;
+};
+
+type Posicao = {
+  saldo: number;
+  encargos: number;
+  principal: number;
+  titulos: number;
+  diasAtrasoMaximo: number;
+  faixa: string;
+};
+
+type RespostaOfertas = {
+  posicao: Posicao;
+  ofertas: Ofertas;
+  alcadaMaxima: number;
 };
 
 type Mensagem = {
@@ -64,6 +96,7 @@ const FRASES_PRONTAS = [
 const chaves = {
   fila: (pagina: number) => ["conversas", pagina] as const,
   thread: (id: string) => ["conversas", id, "mensagens"] as const,
+  ofertas: (clienteId: string) => ["ofertas", clienteId] as const,
 };
 
 export default function Mesa() {
@@ -502,8 +535,22 @@ function Bolha({ mensagem }: { mensagem: Mensagem }) {
 // ─── coluna 3: contexto do cliente ───────────────────────────────────────
 
 function ColunaCliente({ conversa }: { conversa: Conversa }) {
+  const clienteId = conversa.clienteId;
+
+  const consulta = useQuery({
+    queryKey: chaves.ofertas(clienteId ?? "sem-cliente"),
+    queryFn: async () =>
+      (await api.get<RespostaOfertas>(`/carteira/clientes/${clienteId}/ofertas`, {
+        // 404 é resposta normal aqui: cliente sem título aberto, ou fora da
+        // carteira de quem olha. O toast global só assustaria o analista.
+        skipErroGlobal: true,
+      })).data,
+    enabled: clienteId !== null,
+    retry: false,
+  });
+
   return (
-    <div className="hidden min-w-0 flex-col border-l border-surface-border xl:flex">
+    <div className="hidden min-w-0 flex-col overflow-y-auto border-l border-surface-border xl:flex">
       <div className="flex items-center gap-3 border-b border-surface-border px-4 py-3">
         <Iniciais nome={conversa.nome} />
         <div className="min-w-0">
@@ -517,34 +564,31 @@ function ColunaCliente({ conversa }: { conversa: Conversa }) {
       </div>
 
       <div className="space-y-4 p-4">
-        {conversa.clienteId ? (
-          <div className="rounded-md border border-verde-arcom/25 bg-verde-arcom/10 p-3">
-            <p className="flex items-center gap-2 text-xs font-bold text-verde-arcom">
-              <User className="h-4 w-4" aria-hidden />
-              Reconhecido na carteira
-            </p>
-            <p className="mt-1 text-xs text-arcom-gray">
-              O número casa com um cliente cadastrado, então a dívida e a
-              política aplicável vêm da carteira.
-            </p>
-            <Link
-              to="/carteira"
-              className="mt-2 inline-block text-xs font-bold text-verde-arcom underline"
-            >
-              Abrir na carteira
-            </Link>
-          </div>
-        ) : (
+        {clienteId === null ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
             <p className="text-xs font-bold text-amber-700">
               Número não reconhecido
             </p>
             <p className="mt-1 text-xs text-amber-700">
-              Esse telefone não casou com nenhum cliente da carteira. Confirme
-              quem é antes de tratar de valores — pode ser contato novo do
-              cliente, ou pessoa errada.
+              Esse telefone não casou com nenhum cliente da carteira, então não
+              há posição nem condição para mostrar. Confirme quem é antes de
+              tratar de valores.
             </p>
           </div>
+        ) : consulta.isLoading ? (
+          <Carregando texto="Calculando condições…" />
+        ) : consulta.isError || !consulta.data ? (
+          <div className="rounded-md border border-surface-border bg-surface p-3">
+            <p className="text-xs font-bold text-verde-escuro">
+              Sem título em atraso aberto
+            </p>
+            <p className="mt-1 text-xs text-arcom-gray">
+              Este cliente não tem saldo em aberto na sua carteira — ou já
+              fechou acordo, e aí não há condição nova a oferecer.
+            </p>
+          </div>
+        ) : (
+          <PainelDeOfertas dados={consulta.data} />
         )}
 
         <div>
@@ -557,31 +601,168 @@ function ColunaCliente({ conversa }: { conversa: Conversa }) {
               : "Fechada. Só a régua alcança este cliente agora."}
           </p>
         </div>
-
-        <div>
-          <span className="text-[10px] font-bold tracking-wider text-arcom-gray uppercase">
-            Última mensagem
-          </span>
-          <p className="mt-1 text-sm text-verde-escuro">
-            {dataHora(conversa.ultimaMensagemEm)}
-          </p>
-        </div>
-
-        {/* O painel de ofertas do desenho original (condição à vista, parcelado
-            e a travada por alçada) depende de um cálculo que o backend ainda
-            não expõe. Fica dito, e não simulado: número de acordo inventado na
-            tela do analista vira proposta errada ao cliente. */}
-        <div className="rounded-md border border-dashed border-surface-border p-3">
-          <span className="text-[10px] font-bold tracking-wider text-arcom-gray uppercase">
-            Próxima etapa
-          </span>
-          <p className="mt-1 text-xs text-arcom-gray">
-            As condições calculadas — à vista, parcelado e o que exige aprovação
-            — entram aqui quando o cálculo de oferta virar endpoint. Até então,
-            simule pela tela da dívida antes de propor ao cliente.
-          </p>
-        </div>
       </div>
+    </div>
+  );
+}
+
+function PainelDeOfertas({ dados }: { dados: RespostaOfertas }) {
+  const { posicao, ofertas, alcadaMaxima } = dados;
+
+  return (
+    <>
+      <div className="rounded-md border border-surface-border bg-surface p-3">
+        <span className="text-[10px] font-bold tracking-wider text-arcom-gray uppercase">
+          Saldo em atraso
+        </span>
+        <p className="mt-1 text-xl font-black text-verde-escuro tabular-nums">
+          {moeda(posicao.saldo)}
+        </p>
+        <p className="mt-0.5 text-xs text-arcom-gray">
+          {posicao.titulos} {posicao.titulos === 1 ? "título" : "títulos"} ·{" "}
+          {posicao.diasAtrasoMaximo} dias · faixa {ROTULO_FAIXA[posicao.faixa] ?? posicao.faixa}
+        </p>
+
+        <dl className="mt-3 space-y-1 border-t border-surface-border pt-2 text-xs">
+          <div className="flex justify-between gap-2">
+            <dt className="text-arcom-gray">Principal</dt>
+            <dd className="font-bold text-verde-escuro tabular-nums">
+              {moeda(posicao.principal)}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-2">
+            <dt className="text-arcom-gray">Juros e encargos</dt>
+            <dd className="font-bold text-verde-escuro tabular-nums">
+              {moeda(posicao.encargos)}
+            </dd>
+          </div>
+        </dl>
+
+        <p className="mt-2 text-xs leading-relaxed text-arcom-gray">
+          {posicao.encargos > 0 ? (
+            <>
+              O desconto incide <strong className="text-verde-escuro">somente sobre
+              juros e encargos</strong>. Sua alçada é de {porcentagem(alcadaMaxima)}.
+            </>
+          ) : (
+            <>
+              Este cliente está <strong className="text-verde-escuro">sem encargos
+              separados</strong>, então não há desconto a conceder — o desconto da
+              ARCOM incide só sobre juros e multa.
+            </>
+          )}
+        </p>
+      </div>
+
+      <CartaoDeOferta
+        titulo="À vista"
+        oferta={ofertas.avista}
+        posicao={posicao}
+        selo="Sua alçada"
+      />
+
+      {ofertas.parcelado ? (
+        <CartaoDeOferta
+          titulo={`Parcelado em até ${ofertas.parcelado.maxParcelas}x`}
+          oferta={ofertas.parcelado}
+          posicao={posicao}
+          selo="Sua alçada"
+          nota={`O parcelamento cobre os ${posicao.titulos} títulos em atraso do CNPJ — não é possível parcelar um título isolado.`}
+        />
+      ) : null}
+
+      {ofertas.ampliada ? (
+        <CartaoDeOferta
+          titulo="Com desconto ampliado"
+          oferta={ofertas.ampliada}
+          posicao={posicao}
+          selo="Exige aprovação"
+          nota={`Acima da sua alçada de ${porcentagem(alcadaMaxima)}. Não ofereça ao cliente sem aprovação da coordenação.`}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function CartaoDeOferta({
+  titulo,
+  oferta,
+  posicao,
+  selo,
+  nota,
+}: {
+  titulo: string;
+  oferta: Oferta;
+  posicao: Posicao;
+  selo: string;
+  nota?: string;
+}) {
+  const travada = oferta.exigeAprovacao;
+
+  return (
+    <div
+      className={cn(
+        "rounded-md border p-3",
+        travada
+          ? "border-dashed border-danger/40 bg-danger/5"
+          : "border-surface-border bg-white",
+      )}
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <b className="text-sm font-bold text-verde-escuro">{titulo}</b>
+        <Etiqueta tom={travada ? "perigo" : "sucesso"}>{selo}</Etiqueta>
+      </div>
+
+      <dl className="mt-2 space-y-1 text-xs">
+        <div className="flex justify-between gap-2">
+          <dt className="text-arcom-gray">Desconto nos juros</dt>
+          <dd className="font-bold text-verde-escuro tabular-nums">
+            {porcentagem(oferta.descontoPct)} · {moeda(oferta.desconto)}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-arcom-gray">Valor</dt>
+          <dd className="font-bold text-verde-escuro tabular-nums">
+            {moeda(oferta.valorTotal)}
+          </dd>
+        </div>
+        {oferta.maxParcelas > 1 ? (
+          <div className="flex justify-between gap-2">
+            <dt className="text-arcom-gray">Parcelas</dt>
+            <dd className="font-bold text-verde-escuro tabular-nums">
+              até {oferta.maxParcelas}x
+            </dd>
+          </div>
+        ) : null}
+        {oferta.entrada > 0 ? (
+          <div className="flex justify-between gap-2">
+            <dt className="text-arcom-gray">Entrada mínima</dt>
+            <dd className="font-bold text-verde-escuro tabular-nums">
+              {moeda(oferta.entrada)}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {nota ? (
+        <p
+          className={cn(
+            "mt-2 text-xs leading-relaxed",
+            travada ? "font-bold text-danger" : "text-arcom-gray",
+          )}
+        >
+          {nota}
+        </p>
+      ) : null}
+
+      {/* O desconto nunca pode passar dos encargos. Se passar, a conta voltou
+          a incidir sobre mercadoria — e é melhor a tela gritar do que o
+          analista oferecer. */}
+      {oferta.desconto > posicao.encargos ? (
+        <p className="mt-2 text-xs font-bold text-danger">
+          Desconto acima dos encargos. Não ofereça: avise a coordenação.
+        </p>
+      ) : null}
     </div>
   );
 }

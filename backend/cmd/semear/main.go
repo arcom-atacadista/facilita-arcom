@@ -1,7 +1,7 @@
 // Comando de desenvolvimento que cria uma carteira fictícia para demonstrar o
 // sistema antes de existir a chave do Gateway ARCOM.
 //
-// POR QUE ISTO EXISTE
+// # POR QUE ISTO EXISTE
 //
 // A carteira do Facilita ARCOM é espelho do Gateway: dívida entra pela
 // sincronização (internal/carteira) e não há endpoint para criar dívida à mão,
@@ -54,12 +54,29 @@ const CodigoCobrancaDemo = "DEMO"
 // para a dívida cair sempre na mesma faixa da régua independente de quando o
 // comando roda.
 type devedor struct {
-	nome          string
-	documento     string
-	contrato      string
-	valor         float64
-	diasDeAtraso  int
+	nome      string
+	documento string
+
+	// titulos é a posição do CNPJ. Mais de um de propósito em parte dos casos:
+	// o acordo da ARCOM engloba todos os títulos em atraso do cliente, e uma
+	// carteira de exemplo com um título por devedor não demonstraria isso.
+	titulos []titulo
+
 	oQueDemonstra string
+}
+
+type titulo struct {
+	contrato string
+
+	// valor é o saldo devedor; encargos é a parte dele que é juros e multa.
+	//
+	// Semear encargo é o que faz a demonstração mostrar desconto: a política da
+	// ARCOM incide SÓ sobre juros, então título sem encargo separado aparece
+	// com desconto zero — correto, e sem graça de mostrar.
+	valor    float64
+	encargos float64
+
+	diasDeAtraso int
 }
 
 // A carteira cobre as três faixas da régua (3-30, 31-60, 61-90) e mistura CPF
@@ -67,34 +84,61 @@ type devedor struct {
 var carteira = []devedor{
 	{
 		nome: "Mercado do João LTDA", documento: "11222333000181",
-		contrato: "CTR-2026-0413", valor: 4820.50, diasDeAtraso: 12,
+		titulos: []titulo{
+			{contrato: "CTR-2026-0413", valor: 4820.50, encargos: 312.40, diasDeAtraso: 12},
+		},
 		oQueDemonstra: "PJ na faixa inicial — a mensagem chama de \"Mercado do João\", não de \"Mercado\"",
 	},
 	{
 		nome: "Maria Aparecida da Silva", documento: "11122233396",
-		contrato: "CTR-2026-0388", valor: 1240.00, diasDeAtraso: 27,
+		titulos: []titulo{
+			{contrato: "CTR-2026-0388", valor: 1240.00, encargos: 61.80, diasDeAtraso: 27},
+		},
 		oQueDemonstra: "PF na faixa inicial — a mensagem chama de \"Maria\"",
 	},
 	{
-		nome: "Distribuidora Santa Rita ME", documento: "44555666000172",
-		contrato: "CTR-2026-0291", valor: 18750.90, diasDeAtraso: 44,
-		oQueDemonstra: "faixa intermediária, valor alto",
+		// Os números do desenho da mesa: seis títulos, saldo de R$ 84.210,00 com
+		// R$ 4.370,00 de encargos. É o caso que mostra o acordo consolidado.
+		nome: "Supermercado Boa Compra LTDA", documento: "21884302000145",
+		titulos: []titulo{
+			{contrato: "CTR-2026-0291", valor: 18750.90, encargos: 970.20, diasDeAtraso: 42},
+			{contrato: "CTR-2026-0292", valor: 15300.00, encargos: 794.30, diasDeAtraso: 41},
+			{contrato: "CTR-2026-0293", valor: 14980.10, encargos: 777.50, diasDeAtraso: 38},
+			{contrato: "CTR-2026-0294", valor: 13420.00, encargos: 696.40, diasDeAtraso: 36},
+			{contrato: "CTR-2026-0295", valor: 11109.00, encargos: 576.60, diasDeAtraso: 34},
+			{contrato: "CTR-2026-0296", valor: 10650.00, encargos: 555.00, diasDeAtraso: 33},
+		},
+		oQueDemonstra: "seis títulos num CNPJ só — a posição consolidada e o acordo que cobre tudo",
 	},
 	{
 		nome: "José Carlos Ferreira", documento: "44455566677",
-		contrato: "CTR-2026-0305", valor: 640.00, diasDeAtraso: 51,
+		titulos: []titulo{
+			{contrato: "CTR-2026-0305", valor: 640.00, encargos: 44.90, diasDeAtraso: 51},
+		},
 		oQueDemonstra: "faixa intermediária, valor baixo — testa o mínimo de parcela",
 	},
 	{
 		nome: "Padaria Pão Quente EIRELI", documento: "77888999000163",
-		contrato: "CTR-2025-1180", valor: 9310.25, diasDeAtraso: 73,
-		oQueDemonstra: "faixa final",
+		titulos: []titulo{
+			{contrato: "CTR-2025-1180", valor: 9310.25, encargos: 1023.10, diasDeAtraso: 73},
+			{contrato: "CTR-2025-1181", valor: 4180.00, encargos: 459.80, diasDeAtraso: 68},
+		},
+		oQueDemonstra: "faixa final, onde a política concede mais do que a alçada do analista",
 	},
 	{
 		// Foi este valor que expôs o arredondamento perdendo um centavo.
 		nome: "Comercial Três Irmãos S/A", documento: "99000111000154",
-		contrato: "CTR-2025-0940", valor: 1234567.89, diasDeAtraso: 88,
-		oQueDemonstra: "faixa final, valor que já quebrou o arredondamento uma vez",
+		titulos: []titulo{
+			{contrato: "CTR-2025-0940", valor: 1234567.89, encargos: 135802.47, diasDeAtraso: 88},
+		},
+		oQueDemonstra: "valor que já quebrou o arredondamento uma vez",
+	},
+	{
+		nome: "Distribuidora Vale Norte ME", documento: "55666777000122",
+		titulos: []titulo{
+			{contrato: "CTR-2026-0350", valor: 7420.00, encargos: 0, diasDeAtraso: 45},
+		},
+		oQueDemonstra: "sem encargo separado — a tela tem que dizer que não há desconto, e não inventar um",
 	},
 }
 
@@ -152,26 +196,30 @@ func executar(ctx context.Context, log *slog.Logger) error {
 
 	hoje := time.Now().UTC().Truncate(24 * time.Hour)
 
+	var totalTitulos int
 	for _, d := range carteira {
 		clienteID, err := upsertCliente(ctx, bd, d, telefone)
 		if err != nil {
 			return fmt.Errorf("cliente %s: %w", d.nome, err)
 		}
 
-		vencimento := hoje.AddDate(0, 0, -d.diasDeAtraso)
-		if err := upsertDivida(ctx, bd, clienteID, d, vencimento); err != nil {
-			return fmt.Errorf("dívida %s: %w", d.contrato, err)
+		for _, t := range d.titulos {
+			vencimento := hoje.AddDate(0, 0, -t.diasDeAtraso)
+			if err := upsertDivida(ctx, bd, clienteID, t, vencimento); err != nil {
+				return fmt.Errorf("dívida %s: %w", t.contrato, err)
+			}
+			totalTitulos++
 		}
 
 		log.Info("devedor pronto",
 			"nome", d.nome,
-			"contrato", d.contrato,
-			"dias_de_atraso", d.diasDeAtraso,
+			"titulos", len(d.titulos),
 			"demonstra", d.oQueDemonstra)
 	}
 
 	log.Info("carteira de exemplo criada",
 		"devedores", len(carteira),
+		"titulos", totalTitulos,
 		"telefone_de_todos", telefone,
 		"responsavel_cobranca", CodigoCobrancaDemo)
 	log.Info("para um analista ver esta carteira, o codigo_cobranca dele precisa ser " +
@@ -197,15 +245,17 @@ func upsertCliente(ctx context.Context, bd *sql.DB, d devedor, telefone string) 
 // upsertDivida cria a dívida em aberto. status fica de fora do UPDATE de
 // propósito: se você já negociou essa dívida na demonstração, rodar o comando
 // de novo não deve reabrir o acordo — é a mesma regra da sincronização real.
-func upsertDivida(ctx context.Context, bd *sql.DB, clienteID uuid.UUID, d devedor, vencimento time.Time) error {
+func upsertDivida(ctx context.Context, bd *sql.DB, clienteID uuid.UUID, t titulo, vencimento time.Time) error {
 	_, err := bd.ExecContext(ctx, `
 		INSERT INTO dividas
-		  (id, cliente_id, contrato, valor_original, vencimento, status, responsavel_cobranca, origem)
-		VALUES ($1, $2, $3, $4, $5, 'aberto', $6, 'manual')
+		  (id, cliente_id, contrato, valor_original, valor_encargos, vencimento, status,
+		   responsavel_cobranca, origem)
+		VALUES ($1, $2, $3, $4, $5, $6, 'aberto', $7, 'manual')
 		ON CONFLICT (cliente_id, contrato) DO UPDATE
 		  SET valor_original = EXCLUDED.valor_original,
+		      valor_encargos = EXCLUDED.valor_encargos,
 		      vencimento     = EXCLUDED.vencimento,
 		      atualizado_em  = now()
-	`, uuid.New(), clienteID, d.contrato, d.valor, vencimento, CodigoCobrancaDemo)
+	`, uuid.New(), clienteID, t.contrato, t.valor, t.encargos, vencimento, CodigoCobrancaDemo)
 	return err
 }
