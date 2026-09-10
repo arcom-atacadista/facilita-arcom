@@ -95,6 +95,10 @@ export type Acordo = {
   status: "ativo" | "quitado" | "rompido" | "cancelado";
   origem: "cliente" | "operador";
   criadoEm: string;
+  /** Preenchido quando o acordo foi encerrado — por decisão de alguém ou pela
+   *  sincronização, quando os títulos saíram do Gateway. */
+  encerradoEm: string | null;
+  motivo: string | null;
   lista: Parcela[];
 };
 

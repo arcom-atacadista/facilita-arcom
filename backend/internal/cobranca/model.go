@@ -186,8 +186,16 @@ type Acordo struct {
 	Origem        string
 	CriadoPor     *uuid.UUID `gorm:"type:uuid;column:criado_por"`
 	AprovadoPor   *uuid.UUID `gorm:"type:uuid;column:aprovado_por"`
-	CriadoEm      time.Time  `gorm:"column:criado_em"`
-	AtualizadoEm  time.Time  `gorm:"column:atualizado_em"`
+
+	// EncerradoPor nulo com EncerradoEm preenchido significa que foi a
+	// sincronização que encerrou (o cliente pagou e o título sumiu do
+	// Gateway), não uma decisão de alguém.
+	EncerradoPor       *uuid.UUID `gorm:"type:uuid;column:encerrado_por"`
+	EncerradoEm        *time.Time `gorm:"column:encerrado_em"`
+	MotivoEncerramento *string    `gorm:"column:motivo_encerramento"`
+
+	CriadoEm     time.Time `gorm:"column:criado_em"`
+	AtualizadoEm time.Time `gorm:"column:atualizado_em"`
 
 	Lista     []Parcela      `gorm:"foreignKey:AcordoID"`
 	Cobertura []AcordoDivida `gorm:"foreignKey:AcordoID"`
@@ -275,6 +283,8 @@ type AcordoResposta struct {
 	Status        string            `json:"status"`
 	Origem        string            `json:"origem"`
 	CriadoEm      time.Time         `json:"criadoEm"`
+	EncerradoEm   *time.Time        `json:"encerradoEm"`
+	Motivo        *string           `json:"motivo"`
 	Lista         []ParcelaResposta `json:"lista"`
 }
 
@@ -298,6 +308,18 @@ type EntradaAtualizarPolitica struct {
 // EntradaFecharAcordo é o acordo lançado por um operador na mesa (o cliente
 // que fecha sozinho passa pelo pacote negociacao, que não aceita desconto
 // arbitrário — usa só o da política).
+// EntradaMudarStatusDoAcordo é a transição pedida pela coordenação.
+//
+// Só os três destinos que existem de verdade: "ativo" não entra porque acordo
+// não volta atrás — reabrir uma negociação encerrada é fechar um acordo novo,
+// com a posição recalculada na data de hoje.
+type EntradaMudarStatusDoAcordo struct {
+	Status string `json:"status" validate:"required,oneof=rompido cancelado quitado"`
+	// Motivo é opcional: obrigar justificativa produz "asdf" em campo de
+	// formulário, não informação.
+	Motivo string `json:"motivo" validate:"omitempty,max=500"`
+}
+
 // EntradaFecharAcordo aponta para o CLIENTE, não para um título: o acordo
 // engloba todos os títulos em atraso do CNPJ, e receber um dividaId aqui daria
 // a impressão de que dá para negociar um documento isolado.
@@ -333,7 +355,8 @@ func RespostaDeAcordo(a Acordo) AcordoResposta {
 		TipoPagamento: a.TipoPagamento,
 		DescontoPct:   a.DescontoPct, Entrada: a.Entrada, Parcelas: a.Parcelas,
 		ValorTotal: a.ValorTotal, Status: a.Status, Origem: a.Origem,
-		CriadoEm: a.CriadoEm, Lista: lista,
+		CriadoEm: a.CriadoEm, EncerradoEm: a.EncerradoEm, Motivo: a.MotivoEncerramento,
+		Lista: lista,
 	}
 }
 

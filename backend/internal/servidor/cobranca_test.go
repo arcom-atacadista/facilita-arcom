@@ -552,3 +552,290 @@ func TestFecharAcordoDeClienteForaDaCarteiraRespondem404(t *testing.T) {
 		t.Errorf("gravou %d acordo(s) fora do escopo", quantos)
 	}
 }
+
+// --- ciclo de vida do acordo ---
+
+func acordoAtivoDe(t *testing.T, gdb *gorm.DB) uuid.UUID {
+	t.Helper()
+	var bruto string
+	if err := gdb.Raw(`SELECT id::text FROM acordos WHERE status = 'ativo' LIMIT 1`).Scan(&bruto).Error; err != nil {
+		t.Fatalf("achar acordo ativo: %v", err)
+	}
+	id, err := uuid.Parse(bruto)
+	if err != nil {
+		t.Fatalf("nenhum acordo ativo no banco")
+	}
+	return id
+}
+
+// clienteComAcordo semeia dois títulos, fecha um acordo sobre eles e devolve
+// cliente e acordo.
+func clienteComAcordo(t *testing.T, h http.Handler, gdb *gorm.DB, cookie *http.Cookie, doc string) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	primeira := semearDivida(t, gdb, doc, "CT-A", "", 1000, 40)
+	cliente := clienteDaDivida(t, gdb, primeira)
+	semearDividaDoCliente(t, gdb, cliente, "CT-B", 500, 50, 45)
+
+	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
+		"clienteId": cliente, "tipoPagamento": "pix", "descontoPct": 10, "parcelas": 1,
+	}, cookie); rec.Code != http.StatusCreated {
+		t.Fatalf("fechar acordo: status %d (%s)", rec.Code, rec.Body.String())
+	}
+	return cliente, acordoAtivoDe(t, gdb)
+}
+
+func statusDosTitulos(t *testing.T, gdb *gorm.DB, cliente uuid.UUID) map[string]int64 {
+	t.Helper()
+	type linha struct {
+		Status string
+		N      int64
+	}
+	var linhas []linha
+	if err := gdb.Raw(`SELECT status, count(*) AS n FROM dividas WHERE cliente_id = ? GROUP BY status`,
+		cliente).Scan(&linhas).Error; err != nil {
+		t.Fatalf("contar títulos: %v", err)
+	}
+	m := map[string]int64{}
+	for _, l := range linhas {
+		m[l.Status] = l.N
+	}
+	return m
+}
+
+func TestRomperAcordoDevolveOsTitulosParaARegua(t *testing.T) {
+	// O ponto inteiro do rompimento: sem reabrir os títulos, quem furou o
+	// acordo para de ser cobrado para sempre.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	cliente, acordo := clienteComAcordo(t, h, gdb, cookie, "11222333000181")
+
+	if st := statusDosTitulos(t, gdb, cliente); st["negociado"] != 2 {
+		t.Fatalf("antes do rompimento: %v, quer 2 negociados", st)
+	}
+
+	rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(),
+		map[string]any{"status": "rompido", "motivo": "não pagou a entrada"}, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("romper: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	if st := statusDosTitulos(t, gdb, cliente); st["aberto"] != 2 {
+		t.Errorf("depois do rompimento: %v, quer os 2 títulos de volta em aberto", st)
+	}
+
+	var status, motivo string
+	var temEncerradoPor bool
+	if err := gdb.Raw(
+		`SELECT status, coalesce(motivo_encerramento,''), encerrado_por IS NOT NULL FROM acordos WHERE id = ?`,
+		acordo).Row().Scan(&status, &motivo, &temEncerradoPor); err != nil {
+		t.Fatalf("ler acordo: %v", err)
+	}
+	if status != "rompido" {
+		t.Errorf("status = %q, quer rompido", status)
+	}
+	if motivo != "não pagou a entrada" {
+		t.Errorf("motivo = %q", motivo)
+	}
+	// Quem rompeu fica registrado: devolver o cliente para a régua é decisão
+	// de gente, e sem o registro ninguém consegue dizer de quem foi.
+	if !temEncerradoPor {
+		t.Error("encerrado_por vazio — rompimento por decisão tem que registrar quem foi")
+	}
+}
+
+func TestQuitarAcordoFechaTitulosEParcelas(t *testing.T) {
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	cliente, acordo := clienteComAcordo(t, h, gdb, cookie, "11222333000181")
+
+	rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(),
+		map[string]any{"status": "quitado"}, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quitar: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	if st := statusDosTitulos(t, gdb, cliente); st["quitado"] != 2 {
+		t.Errorf("títulos: %v, quer 2 quitados", st)
+	}
+
+	// Acordo quitado com parcela em aberto na tela é contradição que ninguém
+	// consegue explicar ao cliente.
+	var emAberto int64
+	if err := gdb.Raw(`SELECT count(*) FROM parcelas WHERE acordo_id = ? AND NOT pago`, acordo).
+		Scan(&emAberto).Error; err != nil {
+		t.Fatalf("contar parcelas: %v", err)
+	}
+	if emAberto != 0 {
+		t.Errorf("%d parcela(s) em aberto num acordo quitado", emAberto)
+	}
+}
+
+func TestAcordoEncerradoNaoEncerraDeNovo(t *testing.T) {
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	_, acordo := clienteComAcordo(t, h, gdb, cookie, "11222333000181")
+	corpo := map[string]any{"status": "rompido"}
+
+	if rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(), corpo, cookie); rec.Code != http.StatusOK {
+		t.Fatalf("primeiro rompimento: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(), corpo, cookie)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("segundo rompimento: status %d, quer 409 (%s)", rec.Code, rec.Body.String())
+	}
+	var p struct{ Codigo string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatalf("ler problema: %v", err)
+	}
+	if p.Codigo != "acordo_nao_ativo" {
+		t.Errorf("codigo = %q, quer acordo_nao_ativo", p.Codigo)
+	}
+}
+
+func TestAcordoNaoVoltaParaAtivo(t *testing.T) {
+	// "ativo" não é destino aceito: reabrir uma negociação encerrada
+	// ressuscitaria valores calculados sobre uma posição que já mudou.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	_, acordo := clienteComAcordo(t, h, gdb, cookie, "11222333000181")
+
+	rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(),
+		map[string]any{"status": "ativo"}, cookie)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, quer 422 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnalistaNaoEncerraAcordo(t *testing.T) {
+	// Devolver o cliente para a régua, ou dar a dívida por paga, é decisão de
+	// coordenação pra cima.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+
+	_, acordo := clienteComAcordo(t, h, gdb, cookieGerencia, "11222333000181")
+
+	cookieAnalista := criarOperador(t, h, cookieGerencia, "an@arcom.com.br", "analista", "ANA")
+	rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(),
+		map[string]any{"status": "rompido"}, cookieAnalista)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, quer 403 (%s)", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	if err := gdb.Raw(`SELECT status FROM acordos WHERE id = ?`, acordo).Scan(&status).Error; err != nil {
+		t.Fatalf("ler acordo: %v", err)
+	}
+	if status != "ativo" {
+		t.Errorf("o acordo virou %q apesar da recusa", status)
+	}
+}
+
+func TestClienteVoltaANegociarDepoisDoRompimento(t *testing.T) {
+	// Fecha o ciclo: rompeu, os títulos voltam, e a mesa oferece condição nova.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookie := logar(t, h, emailGerencia, senhaGerencia)
+
+	cliente, acordo := clienteComAcordo(t, h, gdb, cookie, "11222333000181")
+
+	// Com acordo ativo, a mesa mostra o acordo e não oferece nada novo.
+	r := buscarOfertas(t, h, cookie, cliente)
+	if r.Posicao.Titulos != 0 {
+		t.Errorf("com acordo ativo a posição aberta devia estar zerada, veio %d", r.Posicao.Titulos)
+	}
+
+	if rec := chamar(t, h, http.MethodPatch, "/api/v1/acordos/"+acordo.String(),
+		map[string]any{"status": "rompido"}, cookie); rec.Code != http.StatusOK {
+		t.Fatalf("romper: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Depois do rompimento a posição volta, e um acordo novo pode ser fechado.
+	r = buscarOfertas(t, h, cookie, cliente)
+	if r.Posicao.Titulos != 2 {
+		t.Fatalf("depois do rompimento, títulos = %d, quer 2", r.Posicao.Titulos)
+	}
+	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
+		"clienteId": cliente, "tipoPagamento": "pix", "descontoPct": 5, "parcelas": 1,
+	}, cookie); rec.Code != http.StatusCreated {
+		t.Fatalf("acordo novo depois do rompimento: status %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListarAcordosRespeitaOEscopoDeCarteira(t *testing.T) {
+	// Este teste não existia, e foi por isso que a listagem quebrou em produção
+	// local com um 500: a consulta mudou junto com o acordo por CNPJ e ninguém
+	// exercitava o GET.
+	h, gdb := montarServidor(t)
+	criarGerencia(t, h)
+	cookieGerencia := logar(t, h, emailGerencia, senhaGerencia)
+
+	// Acordo na carteira da ANA, com dois títulos — o caso que fazia o join
+	// duplicar a linha.
+	primeira := semearDivida(t, gdb, "11222333000181", "CT-ANA-1", "ANA", 1000, 40)
+	cliente := clienteDaDivida(t, gdb, primeira)
+	semearDividaDoCliente(t, gdb, cliente, "CT-ANA-2", 500, 50, 45)
+	if rec := chamar(t, h, http.MethodPost, "/api/v1/acordos", map[string]any{
+		"clienteId": cliente, "tipoPagamento": "pix", "descontoPct": 5, "parcelas": 1,
+	}, cookieGerencia); rec.Code != http.StatusCreated {
+		t.Fatalf("fechar acordo: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	listar := func(cookie *http.Cookie) (int, int64) {
+		t.Helper()
+		rec := chamar(t, h, http.MethodGet, "/api/v1/acordos", nil, cookie)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("listar acordos: status %d (%s)", rec.Code, rec.Body.String())
+		}
+		var r struct {
+			Itens []struct {
+				ID      string `json:"id"`
+				Titulos int    `json:"titulos"`
+			} `json:"itens"`
+			Paginacao struct {
+				Total int64 `json:"total"`
+			} `json:"paginacao"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &r); err != nil {
+			t.Fatalf("ler listagem: %v", err)
+		}
+		// A contagem de títulos vem da cobertura, e sem o Preload dela a
+		// listagem mostrava "0 títulos" em todo acordo — o painel de
+		// encerramento dizia "cobrindo 0 títulos" na cara do operador.
+		for _, item := range r.Itens {
+			if item.Titulos == 0 {
+				t.Errorf("acordo %s veio com 0 títulos — a cobertura não foi carregada", item.ID)
+			}
+		}
+		return len(r.Itens), r.Paginacao.Total
+	}
+
+	// Um acordo de dois títulos aparece UMA vez, não duas.
+	if n, total := listar(cookieGerencia); n != 1 || total != 1 {
+		t.Errorf("gerência viu %d itens (total %d), quer 1 e 1 — acordo de 2 títulos não pode duplicar", n, total)
+	}
+
+	cookieAna := criarOperador(t, h, cookieGerencia, "ana-ac@arcom.com.br", "analista", "ANA")
+	if n, _ := listar(cookieAna); n != 1 {
+		t.Errorf("analista dona da carteira viu %d acordos, quer 1", n)
+	}
+
+	cookieBruno := criarOperador(t, h, cookieGerencia, "bruno-ac@arcom.com.br", "analista", "BRUNO")
+	if n, total := listar(cookieBruno); n != 0 || total != 0 {
+		t.Errorf("analista de outra carteira viu %d acordos (total %d), quer nada", n, total)
+	}
+
+	cookieSemCodigo := criarOperador(t, h, cookieGerencia, "novato-ac@arcom.com.br", "analista", "")
+	if n, _ := listar(cookieSemCodigo); n != 0 {
+		t.Errorf("analista sem código viu %d acordos, quer nada", n)
+	}
+}

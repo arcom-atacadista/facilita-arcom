@@ -449,3 +449,58 @@ func (e *ErroDeCampoCobranca) Error() string { return e.Campo + ": " + e.Mensage
 func ErroDeCampo(campo, mensagem string) error {
 	return &ErroDeCampoCobranca{Campo: campo, Mensagem: mensagem}
 }
+
+// --- ciclo de vida do acordo ---
+
+var (
+	// ErrAcordoNaoAtivo é a transição pedida sobre acordo já encerrado. Vira
+	// 409: o pedido está correto, o estado é que não permite.
+	ErrAcordoNaoAtivo = errors.New("acordo não está ativo")
+)
+
+// MudarStatusDoAcordo encerra um acordo ativo.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// O QUE ACONTECE COM OS TÍTULOS EM CADA DESTINO
+//
+//	rompido   — o cliente não honrou. Os títulos VOLTAM para "aberto", e com
+//	            isso voltam para a régua de cobrança. É o ponto inteiro: sem
+//	            reabrir, quem furou o acordo para de ser cobrado para sempre.
+//	cancelado — erro nosso ou renegociação. Mesmo efeito nos títulos; o que
+//	            muda é o registro do motivo, que a listagem mostra.
+//	quitado   — o cliente pagou. Títulos ficam "quitado" e as parcelas viram
+//	            pagas.
+//
+// Acordo não volta para "ativo". Reabrir uma negociação encerrada seria
+// ressuscitar valores calculados sobre uma posição que já mudou — o certo é
+// fechar um acordo novo, com a posição de hoje.
+// ─────────────────────────────────────────────────────────────────────────
+func (s *Service) MudarStatusDoAcordo(ctx context.Context, u acesso.Usuario, id uuid.UUID, e EntradaMudarStatusDoAcordo) (Acordo, error) {
+	a, err := s.repo.AcordoPorID(ctx, id)
+	if err != nil {
+		return Acordo{}, err
+	}
+	if a.Status != StatusAcordoAtivo {
+		return Acordo{}, ErrAcordoNaoAtivo
+	}
+
+	statusDosTitulos := StatusDividaAberta
+	if e.Status == StatusAcordoQuitado {
+		statusDosTitulos = StatusDividaQuitada
+	}
+
+	var motivo *string
+	if e.Motivo != "" {
+		motivo = &e.Motivo
+	}
+
+	agora := s.agora()
+	if err := s.repo.EncerrarAcordo(ctx, a.ID, e.Status, statusDosTitulos, &u.ID, motivo, agora); err != nil {
+		return Acordo{}, err
+	}
+
+	a.Status = e.Status
+	a.EncerradoPor, a.EncerradoEm, a.MotivoEncerramento = &u.ID, &agora, motivo
+	a.AtualizadoEm = agora
+	return a, nil
+}

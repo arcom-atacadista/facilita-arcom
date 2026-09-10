@@ -273,12 +273,24 @@ func (r *Repo) GravarAcordo(ctx context.Context, a *Acordo, parcelas []Parcela) 
 
 func (r *Repo) ListarAcordos(ctx context.Context, u acesso.Usuario, pagina, porPagina int) ([]Acordo, int64, error) {
 	// O escopo de carteira vem das dívidas cobertas: o acordo aparece para quem
-	// é responsável por pelo menos um dos títulos dele. DISTINCT porque um
-	// acordo com seis títulos casaria seis vezes no join.
-	q := r.db.WithContext(ctx).Model(&Acordo{}).Distinct("acordos.*").
-		Joins("JOIN acordo_dividas ON acordo_dividas.acordo_id = acordos.id").
-		Joins("JOIN dividas ON dividas.id = acordo_dividas.divida_id")
-	q = aplicarEscopo(q, u)
+	// é responsável por pelo menos um dos títulos dele.
+	//
+	// EXISTS e não JOIN: um acordo com seis títulos casaria seis vezes no join,
+	// e o DISTINCT que corrigiria isso não sobrevive ao gorm — ele cita
+	// `Distinct("acordos.*")` como identificador e gera "acordos"."*", que o
+	// Postgres recusa. Com EXISTS o Count também sai certo sem tratamento.
+	q := r.db.WithContext(ctx).Model(&Acordo{})
+	if !u.Papel.VeCarteiraInteira() {
+		if u.CodigoCobranca == nil || *u.CodigoCobranca == "" {
+			q = q.Where("1 = 0")
+		} else {
+			q = q.Where(`EXISTS (
+				SELECT 1 FROM acordo_dividas ad
+				  JOIN dividas d ON d.id = ad.divida_id
+				 WHERE ad.acordo_id = acordos.id AND d.responsavel_cobranca = ?
+			)`, *u.CodigoCobranca)
+		}
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -286,7 +298,10 @@ func (r *Repo) ListarAcordos(ctx context.Context, u acesso.Usuario, pagina, porP
 	}
 
 	var acordos []Acordo
+	// Cobertura junto: é dela que sai a contagem de títulos que o acordo cobre,
+	// e sem o Preload a listagem mostrava "0 títulos" em todo acordo.
 	err := q.Preload("Lista", func(db *gorm.DB) *gorm.DB { return db.Order("parcelas.numero") }).
+		Preload("Cobertura").
 		Order("acordos.criado_em DESC").
 		Limit(porPagina).Offset((pagina - 1) * porPagina).
 		Find(&acordos).Error
@@ -296,3 +311,68 @@ func (r *Repo) ListarAcordos(ctx context.Context, u acesso.Usuario, pagina, porP
 // EhDuplicado reconhece a violação do índice único parcial de acordo ativo —
 // é o que transforma a corrida de dois aceites simultâneos num 409 limpo.
 func EhDuplicado(err error) bool { return errors.Is(err, gorm.ErrDuplicatedKey) }
+
+// AcordoPorID carrega o acordo com a cobertura, sem escopo de carteira: quem
+// chama é rota de coordenação, que enxerga tudo por papel.
+func (r *Repo) AcordoPorID(ctx context.Context, id uuid.UUID) (Acordo, error) {
+	var a Acordo
+	err := r.db.WithContext(ctx).
+		Preload("Lista", func(db *gorm.DB) *gorm.DB { return db.Order("parcelas.numero") }).
+		Preload("Cobertura").
+		First(&a, "id = ?", id).Error
+	return a, err
+}
+
+// EncerrarAcordo muda o status do acordo e o dos títulos que ele cobre, numa
+// transação só.
+//
+// A transação não é detalhe: acordo rompido com título ainda "negociado"
+// deixaria o cliente fora da régua para sempre, e título reaberto com acordo
+// ainda "ativo" faria a mesa recusar uma negociação nova. Os dois lados mudam
+// juntos ou nenhum muda.
+//
+// encerradoPor nulo é a sincronização encerrando sozinha; preenchido é decisão
+// de alguém.
+func (r *Repo) EncerrarAcordo(
+	ctx context.Context,
+	acordoID uuid.UUID,
+	statusDoAcordo, statusDosTitulos string,
+	encerradoPor *uuid.UUID,
+	motivo *string,
+	agora time.Time,
+) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&Acordo{}).
+			// A condição de status no UPDATE é a trava contra corrida: dois
+			// pedidos simultâneos de encerramento, só o primeiro aplica.
+			Where("id = ? AND status = ?", acordoID, StatusAcordoAtivo).
+			Updates(map[string]any{
+				"status":              statusDoAcordo,
+				"encerrado_por":       encerradoPor,
+				"encerrado_em":        agora,
+				"motivo_encerramento": motivo,
+				"atualizado_em":       agora,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrAcordoNaoAtivo
+		}
+
+		if err := tx.Model(&Divida{}).
+			Where("id IN (SELECT divida_id FROM acordo_dividas WHERE acordo_id = ?)", acordoID).
+			Updates(map[string]any{"status": statusDosTitulos, "atualizado_em": agora}).Error; err != nil {
+			return err
+		}
+
+		// Quitação marca as parcelas como pagas: acordo quitado com parcela em
+		// aberto na tela é contradição que ninguém consegue explicar.
+		if statusDoAcordo == StatusAcordoQuitado {
+			return tx.Model(&Parcela{}).
+				Where("acordo_id = ? AND NOT pago", acordoID).
+				Updates(map[string]any{"pago": true, "pago_em": agora}).Error
+		}
+		return nil
+	})
+}

@@ -43,6 +43,30 @@ func (h *Handler) RotasPoliticas(r chi.Router) {
 func (h *Handler) RotasAcordos(r chi.Router) {
 	r.Get("/", h.Wrapper(h.listarAcordos))
 	r.Post("/", h.Wrapper(h.fecharAcordo))
+	// Encerrar acordo devolve o cliente para a régua ou dá a dívida por paga.
+	// É decisão de coordenação pra cima, não de quem atende.
+	r.With(acesso.ExigirPapel(acesso.PapelCoordenacao)).
+		Patch("/{id}", h.Wrapper(h.mudarStatusDoAcordo))
+}
+
+// mudarStatusDoAcordo encerra um acordo ativo: rompido, cancelado ou quitado.
+func (h *Handler) mudarStatusDoAcordo(w http.ResponseWriter, r *http.Request) error {
+	u, _ := acesso.DoContexto(r.Context())
+	id, err := idDaRota(r)
+	if err != nil {
+		return err
+	}
+
+	var dto EntradaMudarStatusDoAcordo
+	if err := entrada.Decodificar(r, &dto); err != nil {
+		return err
+	}
+
+	a, err := h.svc.MudarStatusDoAcordo(r.Context(), u, id, dto)
+	if err != nil {
+		return traduzir(err)
+	}
+	return escreverJSON(w, http.StatusOK, RespostaDeAcordo(a))
 }
 
 func (h *Handler) listarDividas(w http.ResponseWriter, r *http.Request) error {
@@ -255,6 +279,11 @@ func traduzir(err error) error {
 		// Cliente sem título aberto e cliente fora do escopo respondem igual,
 		// pela mesma razão do ErrNaoEncontrado abaixo.
 		return problema.NaoEncontrado("Nenhum título em atraso aberto para este cliente.")
+	case errors.Is(err, ErrAcordoNaoAtivo):
+		return problema.ConflitoComCodigo(
+			"Este acordo já foi encerrado. Acordo encerrado não volta a ficar ativo — "+
+				"para renegociar, feche um acordo novo com a posição de hoje.",
+			"acordo_nao_ativo")
 	case errors.Is(err, ErrDividaNaoNegociavel):
 		return problema.Conflito("Esta dívida não está aberta para negociação.")
 	case errors.Is(err, ErrNaoEncontrado):

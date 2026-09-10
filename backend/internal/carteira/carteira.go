@@ -44,6 +44,11 @@ type Resultado struct {
 	Atualizadas int
 	Fechadas    int
 	Ignoradas   int
+
+	// AcordosQuitados são os acordos que a rodada encerrou por pagamento: os
+	// títulos que eles cobriam saíram do Gateway, e sair do Gateway é o que
+	// significa "o ERP deu baixa".
+	AcordosQuitados int
 }
 
 type Service struct {
@@ -152,6 +157,12 @@ func (s *Service) rodar(ctx context.Context, inicio time.Time) (Resultado, error
 		return res, err
 	}
 	res.Fechadas = int(fechadas)
+
+	quitados, err := s.quitarAcordosPagos(ctx, inicio)
+	if err != nil {
+		return res, err
+	}
+	res.AcordosQuitados = int(quitados)
 
 	return res, nil
 }
@@ -380,4 +391,71 @@ func (s *Service) Ultima(ctx context.Context) (*UltimaSincronizacao, error) {
 		return nil, nil
 	}
 	return &u, nil
+}
+
+// quitarAcordosPagos encerra o acordo cujo cliente pagou.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// COMO SE SABE QUE PAGOU
+//
+// O pagamento acontece no ERP, não aqui. O sinal que chega até esta
+// plataforma é indireto e é o mesmo que fecha dívida comum: o título deixa de
+// aparecer no Gateway. Some do Gateway = o ERP deu baixa.
+//
+// fecharAusentes cuida do título "aberto". O título sob acordo está
+// "negociado", que aquela consulta não toca de propósito — reabrir por ausência
+// desfaria o acordo. Aqui é o outro lado: título negociado que sumiu foi pago,
+// e quando TODOS os títulos de um acordo somem, o acordo está quitado.
+//
+// Exige que todos tenham sumido. Pagamento parcial não quita: parcelar em seis
+// e pagar a primeira derruba um título só, e dar o acordo por quitado ali
+// pararia de cobrar as outras cinco.
+//
+// Encerra com encerrado_por nulo — foi o sistema que detectou, não alguém que
+// decidiu.
+// ─────────────────────────────────────────────────────────────────────────
+func (s *Service) quitarAcordosPagos(ctx context.Context, inicio time.Time) (int64, error) {
+	agora := s.agora()
+
+	// Primeiro os títulos: negociado, vindo do Gateway, e ausente nesta rodada.
+	if err := s.db.WithContext(ctx).Model(&cobranca.Divida{}).
+		Where("origem = ? AND status = ? AND (sincronizado_em IS NULL OR sincronizado_em < ?)",
+			"gateway", cobranca.StatusDividaNegociada, inicio).
+		Updates(map[string]any{
+			"status":        cobranca.StatusDividaQuitada,
+			"atualizado_em": agora,
+		}).Error; err != nil {
+		return 0, err
+	}
+
+	// Depois os acordos em que não sobrou nenhum título por quitar.
+	res := s.db.WithContext(ctx).Model(&cobranca.Acordo{}).
+		Where(`status = ? AND NOT EXISTS (
+			SELECT 1 FROM acordo_dividas ad
+			  JOIN dividas d ON d.id = ad.divida_id
+			 WHERE ad.acordo_id = acordos.id AND d.status <> ?
+		)`, cobranca.StatusAcordoAtivo, cobranca.StatusDividaQuitada).
+		Updates(map[string]any{
+			"status":        cobranca.StatusAcordoQuitado,
+			"encerrado_em":  agora,
+			"atualizado_em": agora,
+		})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+
+	if res.RowsAffected > 0 {
+		// As parcelas acompanham: acordo quitado com parcela em aberto na tela
+		// é contradição que ninguém consegue explicar ao cliente.
+		if err := s.db.WithContext(ctx).Exec(`
+			UPDATE parcelas SET pago = TRUE, pago_em = ?
+			 WHERE NOT pago
+			   AND acordo_id IN (SELECT id FROM acordos WHERE status = ? AND encerrado_em = ?)
+		`, agora, cobranca.StatusAcordoQuitado, agora).Error; err != nil {
+			return 0, err
+		}
+		s.log.InfoContext(ctx, "acordos quitados por baixa no Gateway", "quantidade", res.RowsAffected)
+	}
+
+	return res.RowsAffected, nil
 }
