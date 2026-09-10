@@ -278,3 +278,14 @@ func (c *canalMeta) enviarCorpo(ctx context.Context, corpo corpoEnvio) (string, 
 	}
 	return ok.Messages[0].ID, nil
 }
+
+// VersaoAPIOu resolve a versão da Graph API: a configurada, ou o padrão do
+// projeto. Exportada para o cmd/checar-whatsapp bater na mesma versão que o
+// canal usa — um diagnóstico que consulta outra versão pode dar "tudo certo"
+// sobre uma API que não é a do envio.
+func VersaoAPIOu(versao string) string {
+	if versao == "" {
+		return versaoPadraoMeta
+	}
+	return versao
+}
